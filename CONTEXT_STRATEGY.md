@@ -1,13 +1,14 @@
-# Mewtwo Context Strategy — Compression + Dynamic Context
+# Mewtwo V2 Architecture — Compression + Dynamic Context + Gitleaks + Agents
 
 ## Overview
 
-Mewtwo uses two complementary strategies to solve the large-PR problem:
+Mewtwo V2 combines three strategies for high-quality code reviews:
 
-1. **Compression Strategy** — Reduces noise by intelligently shrinking large diffs
-2. **Dynamic Context** — Increases signal by fetching semantically relevant context
+1. **Compression Strategy** — Reduces noise by intelligently shrinking large diffs (50-70% reduction)
+2. **Dynamic Context (Light)** — Increases signal by fetching semantically relevant context (callers, tests, config)
+3. **Gitleaks + LLM Agents** — Deterministic secrets detection + semantic analysis with tool agreement scoring
 
-Together they enable accurate analysis of even massive PRs within token budgets.
+Together they enable accurate analysis of massive PRs within 100K token budget, with high-confidence findings (verified by both tools and LLM agents).
 
 ---
 
@@ -156,7 +157,7 @@ emit_note_to_agent: "Skipped X items due to token limit. Focus on provided conte
 
 ---
 
-## Integration Flow
+## V2 Integration Flow
 
 ```
 PR arrives (labeled "initial-review")
@@ -167,54 +168,121 @@ COMPRESSION PHASE
   ├─ Line-level compression
   ├─ File summarization
   ├─ Pattern grouping
-  └─ Token estimate: 85K ✓ (under 100K budget)
+  └─ Token estimate: 70K ✓ (under 100K budget)
   ↓
-DYNAMIC CONTEXT PHASE
+DYNAMIC CONTEXT PHASE (Light)
   ├─ Parse changed symbols
   ├─ Rank related context by relevance
-  ├─ Fetch top-scoring items (budget: 15K left)
-  └─ Fetched: 2 test files + 1 config file + 3 callers
+  ├─ Fetch top-scoring items (budget: 15K)
+  └─ Fetched: 2 test files + 1 config file + 2 callers
   ↓
-Create prompt with:
-  - Compressed diff (85K)
-  - Dynamic context (14K)
-  - Agent instructions (1K)
-  = 100K total ✓
-  
-  + Note to agent: "Diff compressed 60% (removed 140K unneeded context). 3 callers fetched."
+[PARALLEL]
+  ├─ RUN GITLEAKS
+  │   ├─ Scan changed files for secrets
+  │   ├─ Supervised: retries 3x, then graceful skip
+  │   └─ Results: {file, line, secret_type}
+  │
+  └─ SPAWN AGENTS (5-10 parallel)
+      Each agent gets:
+        - Compressed diff (70K)
+        - Dynamic context (13K)
+        - Gitleaks findings (2K)
+        - Agent instructions (1K)
+        = ~86K per agent ✓
+      
+      Each agent returns:
+        - Findings: {file, line, severity, confidence, reasoning}
   ↓
-Send to agents for analysis
+JUDGE COORDINATOR
+  ├─ Receives: agent_findings[] + gitleaks_findings[]
+  ├─ Deduplicates (same file+line+category)
+  ├─ Scores confidence:
+  │   - LLM + Gitleaks match → "high"
+  │   - LLM or Gitleaks only → "medium"
+  ├─ Ranks by severity + confidence
+  └─ Splits: author_findings (actionable) + reviewer_findings (risk summary)
+  ↓
+POST TO GITHUB
+  ├─ Inline comments (high/medium severity)
+  └─ Summary comment (all findings + metadata)
+  ↓
+STORE IN DB
+  └─ token_usage: {total, per_agent}
+     (findings live in GitHub comments)
 ```
 
 ---
 
-## Implementation Roadmap
+## Tool Agreement Scoring (V2)
+
+Confidence increases when **independent sources agree**:
+
+```
+LLM Agent + Gitleaks Finding (exact match):
+  File: src/config.py
+  Line: 42
+  Issue: Hardcoded API key
+  
+  → Both independently flagged → HIGH CONFIDENCE
+  
+LLM Agent only:
+  File: src/utils.py
+  Line: 15
+  Issue: Potential null dereference
+  
+  → Agent analysis, no tool verification → MEDIUM CONFIDENCE
+
+Gitleaks only:
+  File: .env.example
+  Line: 3
+  Issue: Password pattern detected
+  
+  → Tool detection, agents didn't catch → MEDIUM CONFIDENCE
+```
+
+**Why this works:**
+- Tools are deterministic (low false negatives)
+- LLM is semantic (catches intent, edge cases)
+- Agreement = both determinism + understanding are satisfied
+
+---
+
+## V2 Implementation Roadmap
 
 ### Phase 1a: Compression Engine
 - [ ] `lib/mewtwo/compression.ex` — line-level compression
 - [ ] `lib/mewtwo/compression.ex` — file summarization
 - [ ] `lib/mewtwo/compression.ex` — pattern grouping
 - [ ] Token estimator (count tokens in diff)
-- [ ] Tests: compression maintains all changed lines
 
-### Phase 1b: Dynamic Context Fetcher
+### Phase 1b: Dynamic Context Fetcher (Light)
 - [ ] Symbol parser (extract functions, classes, modules from diff)
-- [ ] `lib/mewtwo/dynamic_context.ex` — fetcher
-- [ ] Code graph queries (find callers — via grep initially, graph later)
+- [ ] `lib/mewtwo/dynamic_context.ex` — fetcher (target: 15K tokens max)
+- [ ] Code queries: find callers via grep
 - [ ] Test file finder (match test files to modules)
-- [ ] Relevance ranker
 - [ ] Budget-aware fetcher (stop when token limit hit)
-- [ ] Note generator ("skipped X items, focus on provided context")
 
-### Phase 2: Integration
-- [ ] Update `lib/mewtwo/pr_context.ex` to use compression + dynamic context
-- [ ] Update `lib/mewtwo/workers/review_worker.ex` to track compression metadata
-- [ ] Store metadata in DB: {tokens_saved, sections_skipped, items_fetched}
+### Phase 1c: Gitleaks Integration
+- [ ] `lib/mewtwo/gitleaks_runner.ex` — spawn gitleaks process
+- [ ] Error handling: supervised, 3 retries, graceful skip
+- [ ] Parse gitleaks JSON output → findings list
+- [ ] Integrate with Agent prompt (embed findings as context)
 
-### Phase 3: Monitoring
+### Phase 2: Agents + Judge
+- [ ] Update agent prompts to receive gitleaks findings
+- [ ] Implement Judge confidence scoring (LLM + tool agreement)
+- [ ] Judge deduplication (same file+line+category)
+- [ ] Split findings: author (high/medium) vs. reviewer (lower)
+
+### Phase 3: GitHub Output + DB
+- [ ] Post findings as GitHub comments (inline + summary)
+- [ ] Store token_usage in DB (per agent + total)
+- [ ] Emit notes to agents (context compressed, items skipped, gitleaks status)
+
+### Phase 4: Monitoring (Optional v2+1)
 - [ ] Track compression ratio (target: 50-70%)
-- [ ] Track dynamic context effectiveness (which items led to findings?)
-- [ ] Dashboard: "PR context profile" (size, compression, dynamic context added)
+- [ ] Track gitleaks effectiveness (how many secrets found vs. false positives?)
+- [ ] Track tool agreement rate (how often LLM + Gitleaks agree?)
 
 ---
 

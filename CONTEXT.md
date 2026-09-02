@@ -62,7 +62,13 @@ A specialized analyzer that evaluates a PR against one dimension (e.g., bugs, pe
 
 ### Judge Agent
 
-A coordinator agent that receives findings from all specialized agents and produces the two final outputs. Categorizes findings as author-actionable vs. reviewer-level risk, ranks by severity/confidence.
+A coordinator agent that receives findings from all specialized agents and static analysis tools, producing the two final outputs. 
+
+**Responsibilities:**
+- Deduplicates findings (same file+line+category from multiple sources)
+- Scores confidence using tool agreement: LLM + deterministic tool match → "high", LLM or tool only → "medium"
+- Ranks by severity + confidence
+- Splits into: author-actionable (high/medium) vs. reviewer-level risk (lower confidence)
 
 ### Golden PR
 
@@ -117,7 +123,26 @@ Reduces generated code and token usage (~22% savings).
 
 ### Confidence Score
 
-Numeric or categorical confidence (e.g., "high", "medium", "low") attached to each agent finding. Used by judge to rank findings and flag uncertain analysis in reviewer output.
+Categorical confidence ("high", "medium", "low") attached to each finding. Used by judge to rank findings and gate posting to GitHub.
+
+**Scoring rules (v2):**
+- **High confidence:** LLM agent + Gitleaks independently flag the same issue (file+line+category match)
+- **Medium confidence:** LLM agent *or* Gitleaks flags it, but not both
+- **Low confidence:** Very uncertain; typically not posted inline, only in reviewer summary
+
+### Gitleaks
+
+Deterministic secrets scanner. Detects API keys, credentials, tokens in code.
+
+**v2 Role:** Only static analysis tool included in v2 (Semgrep deferred to v3). Runs in parallel with agents. Findings feed into Judge's confidence scoring.
+
+**Integration:** Supervised execution — retries up to 3 times on failure. If all retries fail, skips gracefully (doesn't block review).
+
+### Tool Agreement
+
+When LLM agents and static analysis tools independently flag the same issue (exact match: file + line + issue category), it increases confidence that the finding is real (not a hallucination or false positive).
+
+**Example:** Gitleaks detects hardcoded API key at line 42 of config.py. Security agent also flags it. → **High confidence** (tool + LLM agree).
 
 ## Relationships
 

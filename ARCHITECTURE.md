@@ -9,7 +9,7 @@ Zacian is a code review agent system that analyzes PRs across multiple specializ
 
 ---
 
-## Core Flow
+## Core Flow (V2)
 
 ```
 GitHub PR Labeled "initial-review"
@@ -19,22 +19,35 @@ Webhook fires → Handler returns 202 (async)
 Background Job: Fetch PR diff + context
     ├─ Fetch changed files, commits, PR metadata
     ├─ Apply COMPRESSION STRATEGY (smart truncation, summarization)
-    └─ Apply DYNAMIC CONTEXT (fetch callers, tests, configs on-demand)
+    └─ Apply DYNAMIC CONTEXT (light: callers, tests, configs on-demand)
     ↓
-Parallel Agents Run (config-driven, per-repo)
-    - Each agent analyzes compressed + enriched context
-    - Returns: {file, line, severity, summary, details, confidence}
+[PARALLEL]
+    ├─ Run Gitleaks (secrets detection, supervised with 3 retries)
+    │   → findings: {file, line, secret_type}
+    │   → status: success | skipped (if retries exhausted)
+    │
+    └─ Spawn Parallel Agents (5-10, config-driven per-repo)
+        Each agent receives:
+          - Compressed diff
+          - Dynamic context (light)
+          - Gitleaks findings (if available)
+          - Agent-specific instructions + codebase rules
+        → Returns: {findings[], confidence_scores[]}
     ↓
 Judge Coordinator
+    - Receives: agent_findings + gitleaks_findings
     - Deduplicates findings
+    - Scores confidence:
+      * LLM + Gitleaks match (file+line+category) → "high"
+      * LLM or Gitleaks only → "medium"
     - Ranks by severity/confidence
-    - Splits into: Author Output (actionable) + Reviewer Output (risk)
+    - Splits into: Author Output (actionable) + Reviewer Output (risk assessment)
     ↓
 Post to GitHub
-    - Author Output: Inline comments on changed lines
-    - Reviewer Output: Single summary comment
+    - Author Output: Inline comments (high/medium severity only)
+    - Reviewer Output: Summary comment (all findings + metadata)
     ↓
-Store in DB: {review_id, pr_id, findings[], context[], timestamp}
+Store in DB: {review_id, pr_id, status, token_usage{total, per_agent}}
 ```
 
 ---
@@ -131,17 +144,28 @@ After fetching raw diff, intelligently pull additional context:
 - **Output:** compressed diff + metadata (bytes_saved, sections_compressed, sections_skipped)
 - **Integration:** runs before agents, fails gracefully if can't compress enough
 
-### 2b. Dynamic Context Fetcher
+### 2b. Dynamic Context Fetcher (Light)
 
 - **Input:** changed file list, parsed symbols (functions, classes, modules)
 - **Processing:**
   - Query code graph / grep for callers of modified functions
   - Fetch related test files
   - Fetch affected config files (if changed)
-  - Fetch documentation for modified modules
-  - Rank by relevance score
-- **Output:** enriched context {callers, tests, configs, docs} + token budget used
-- **Integration:** runs after compression, respects remaining token budget
+  - Budget-aware: prioritize high-signal context, skip if token budget exhausted
+- **Output:** enriched context {callers, tests, configs} + token budget used
+- **Integration:** runs after compression, respects remaining token budget (target: ~15K)
+
+### 2c. Gitleaks Runner (v2)
+
+- **Input:** PR diff + full file contents
+- **Processing:**
+  - Run Gitleaks on changed files
+  - Extract secret patterns (API keys, credentials, etc.)
+  - Supervised execution: retries up to 3 times on failure
+  - Graceful degradation: if all retries fail, skip and continue
+- **Output:** findings {file, line, secret_type} + run_status (success | skipped)
+- **Confidence:** Deterministic detection, high value for Judge scoring
+- **Integration:** runs in parallel with agents, completes in <1s
 
 ### 3. Agents (Parallel)
 
@@ -152,13 +176,16 @@ After fetching raw diff, intelligently pull additional context:
 
 ### 4. Judge Coordinator
 
-- Wait for all agents to finish
-- Input: agent findings (unranked)
+- Wait for all agents + Gitleaks to finish
+- Input: agent_findings[] + gitleaks_findings[]
 - Logic:
-  - Deduplicate (same line flagged by multiple agents)
-  - Rank (severity + confidence)
-  - Split (author-actionable vs reviewer-level)
-- Output: author_findings[], reviewer_findings[]
+  - **Deduplicate** (same file+line+category from multiple sources)
+  - **Score confidence:** 
+    - LLM + Gitleaks match (exact: file+line+category) → "high"
+    - LLM or Gitleaks only → "medium"
+  - **Rank** by severity + confidence
+  - **Split** (author-actionable vs reviewer-level risk)
+- Output: author_findings[], reviewer_findings[] + confidence metadata
 
 ### 5. GitHub Poster
 
@@ -176,10 +203,22 @@ reviews {
   status (pending | running | complete | cancelled | stale)
   triggered_at
   completed_at
-  author_findings (JSON)
-  reviewer_findings (JSON)
+  
+  # Findings live in GitHub comments (source of truth)
+  # DB stores only operational metrics for cost optimization:
+  token_usage {
+    total_tokens (int)
+    per_agent {
+      "bug-finder": 8000,
+      "security": 7500,
+      "architecture": 6200,
+      ...
+    }
+  }
 }
 ```
+
+**Note:** Findings are posted as comments to GitHub, not stored in DB. GitHub is the source of truth. DB tracks token usage per agent for cost/performance optimization.
 
 ### 7. Repo Configuration
 
@@ -274,35 +313,47 @@ reviews {
 
 ## Improvements Roadmap
 
-### Phase 1 (Now) — Fix Defects + Add Core Context Strategy
+### Phase 1 (V2 Now) — Core Architecture
 
+**Context + Static Analysis**
 - [ ] **Implement COMPRESSION STRATEGY** (line-level, file summarization, pattern grouping)
-- [ ] **Implement DYNAMIC CONTEXT** (fetch callers, tests, configs on-demand)
+- [ ] **Implement DYNAMIC CONTEXT** (light: callers, tests, configs on-demand) — budget: 15K tokens
+- [ ] **Integrate Gitleaks Runner** (secrets detection, supervised with 3 retries, graceful skip)
+
+**Agent + Judge**
+- [ ] Spawn parallel agents with: compressed diff + dynamic context + Gitleaks findings
+- [ ] Implement Judge confidence scoring: LLM + Gitleaks match → "high", LLM or tool only → "medium"
+- [ ] Define severity levels (High/Medium/Low) in prompts + Judge logic
+- [ ] Add confidence gate for inline comments (post only high/medium)
+
+**Quality & Output**
+- [ ] Post findings as GitHub comments (inline + summary)
+- [ ] Don't store findings in DB (GitHub is source of truth)
+- [ ] Store token_usage per agent + total in DB
+- [ ] Emit note to agents when context was compressed or skipped
+- [ ] Post nothing for clean PRs
+
+**Validation**
 - [ ] Add payload size guard before Claude calls (use compression, not rejection)
-- [ ] Raise Judge output limit to ≥16k
+- [ ] Raise Judge output limit to ≥16k tokens
 - [ ] Add code validation to prevent invented findings
 - [ ] Fail fast on diff_too_large (no retries)
-- [ ] Post nothing for clean PRs
-- [ ] Define severity levels (High/Medium/Low) in prompts
-- [ ] Add confidence gate for inline comments
-- [ ] Emit note to agents when context was compressed or skipped
 
-### Phase 2 (v1) — Add Context
+### Phase 2 (V2+1) — Expand Context & Tooling
 
 - [ ] Feed PR description + commit messages into context
 - [ ] Ingest repo docs (README, CONTRIBUTING.md, ADRs, AGENTS.md)
-- [ ] Give Reviewer context to Specialist + Judge stages
-- [ ] Add severity rubric to findings schema
-- [ ] Remove Jira UI references (or implement client)
 - [ ] Support GitHub pagination (>100 files)
+- [ ] Add actual test coverage data (not just file presence)
 
-### Phase 3 (v2) — Impact & Validation
+### Phase 3 (V3) — Full Static Analysis + Graph
 
-- [ ] Add call graph / reverse dependency analysis
-- [ ] Implement deterministic security scanning (Gitleaks/Semgrep)
-- [ ] Surface actual test coverage data (not just file presence)
+- [ ] **Add Semgrep** (SAST patterns, custom rules per codebase)
+- [ ] **Add language-specific linters** (ESLint, Pylint, etc. — opt-in per repo)
+- [ ] **Build Graphify Graph** (code knowledge graph with call analysis, reverse deps)
+- [ ] Use graph queries instead of grep for "find callers"
 - [ ] Build CODEOWNERS / ownership awareness
-- [ ] Implement validation run (tests, linters, scanners)
+- [ ] Implement validation run (CI checks, build status)
 - [ ] Add cross-repo awareness
 
 ---
