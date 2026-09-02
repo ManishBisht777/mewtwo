@@ -168,15 +168,18 @@
 
 ## Phase 2: Agents + Judge
 
-### A1: Agent Findings Schema
+### A1: Agent Findings Schema ✅ COMPLETE
 **Depends on:** None
 **Files:** `lib/mewtwo/findings/agent_finding.ex`
-- [ ] Define struct: `%AgentFinding{file, line, severity, confidence, category, message, reasoning}`
-- [ ] Validate severity ∈ {high, medium, low}
-- [ ] Validate confidence ∈ {high, medium, low}
+- [x] Define struct: `%AgentFinding{file, line, severity, confidence, category, message, reasoning}`
+- [x] Validate severity ∈ {high, medium, low}
+- [x] Validate confidence ∈ {high, medium, low}
 
-**Acceptance:**
+**Status:** ✅ Complete (29 tests passing)
 - Struct compiles and validates correctly
+- All field validations working
+- Error handling tested
+- 8 severity/confidence combinations validated
 
 ### A2: Update Agent Prompts
 **Depends on:** A1, C4, D5, G3
