@@ -64,7 +64,7 @@ defmodule Mewtwo.GithubClient do
   defp parse_next_link(link_header) do
     link_header
     |> String.split(",")
-    |> Enum.find_map(fn link ->
+    |> Enum.find_value(fn link ->
       if String.contains?(link, "rel=\"next\"") do
         case Regex.run(~r/<(.+?)>/, link) do
           [_, url] -> url
