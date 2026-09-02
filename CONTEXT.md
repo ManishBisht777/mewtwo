@@ -100,3 +100,62 @@ Numeric or categorical confidence (e.g., "high", "medium", "low") attached to ea
 - One review → two outputs (author-facing and reviewer-facing)
 - All agents → one judge agent → two outputs
 - Each agent → independent feedback loop and iterative improvement
+
+---
+
+## Quality & Safety Principles
+
+### Noise Posture (Critical)
+
+**Core Thesis:** Silence is better than noise. Precision over exhaustiveness.
+
+- **No comment for clean PRs** — if there are no issues, post nothing
+- **Bias toward fewer findings** — report only high-confidence, actionable issues
+- **Severity floor for inline comments** — only high/medium severity gets posted to code
+- **Findings cap** — implement a reasonable limit to prevent reviewer fatigue
+- **Confidence gates** — low-confidence findings don't post inline
+
+**Current State:** Violated. Clean PRs get "Zacian review — no issues found" comment. Every finding is reported regardless of severity/confidence.
+
+### Safety Boundary (Inviolable)
+
+- **No automatic approvals** — event type is "COMMENT" only (never "APPROVE" or "REQUEST_CHANGES")
+- **No commit status mutations** — no green checks, no blocking status on failures
+- **Read-only to GitHub** — write access is exactly: post comment, update comment (2 endpoints)
+- **Cannot manufacture a false signal** — a developer cannot merge based on Zacian
+
+### Context Gap (Highest Priority)
+
+Zacian misses critical inputs:
+
+1. **Architectural Intent** — No ADRs, design docs, AGENTS.md, README, CONTRIBUTING.md
+   - Fix: ingest repo-resident docs via fetch_file path
+   - Payoff: directly reduces "flagging intentional design decisions" failures
+   
+2. **Historical Context** — PR bodies, commit messages, review discussion are fetched then discarded
+   - Fix: retain commit.message and PR descriptions in context
+   - Payoff: "why this workaround exists" becomes visible
+   
+3. **Repository Awareness** — Only changed files, no callers, no importers, no tests, no call graph, no CODEOWNERS
+   - Fix: defer to v2 (needs retrieval mechanism, not just prompt tweaks)
+   
+4. **Verifier Blindness** — Specialists and Judge get candidates_json + diff only; file contents dropped
+   - Fix: give verifiers the same context as the Reviewer before they decide keep/drop
+   - Timing: do this before adding new sources
+
+### Severity Calibration (Currently Missing)
+
+- **Enum exists** — ["high", "medium", "low"] is bare with no definition
+- **Yet it's load-bearing** — drives ordering, dashboard display, author vs. reviewer split
+- **Fix:** Define each level in prompts:
+  - High: breaks functionality, security risk, or correctness bug
+  - Medium: performance, maintainability, or design issue
+  - Low: style note, refactoring suggestion
+
+### Deterministic Validation (v1 Gaps)
+
+- **Security detection** — relies on LLM opinion, not rules (gitleaks/semgrep class scanner needed)
+- **Test coverage** — eyeballs whether test files appear in diff, not actual coverage data
+- **No validation run** — zero tests, linters, scanners, secret detection, or checkout
+- **Fix:** add a scanner (gitleaks/semgrep) for secrets, surface actual test coverage metrics
+

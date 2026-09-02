@@ -118,6 +118,60 @@ reviews {
 
 ---
 
+## Known Defects (Fix Now)
+
+### Critical Path Blockers
+
+1. **Payload size can exceed model context** (Haiku 4.5 = 200K token limit)
+   - 400KB diff + 400KB file context ≈ 200–250k tokens
+   - No guard check before calling Claude API
+   - Fix: Add size check against selected model, reject early if over limit
+
+2. **Judge output budget is half Reviewer's** (8k vs 16k tokens)
+   - Long finding lists truncate mid-tool-call → :no_tool_result
+   - Whole review fails and burns retries
+   - Fix: Raise Judge's output limit to ≥16k
+
+3. **Findings can be invented by Specialists**
+   - verify_category/4 returns model's list wholesale, no enforcement
+   - No set-membership check against candidates
+   - Fix: Add code validation — length(verified) <= length(candidates), file/line unchanged
+
+4. **:diff_too_large burns retries deterministically**
+   - Not a transient failure, but treated as retriable
+   - Fix: Fail fast with clear message instead of 3 retry attempts
+
+5. **Missing context is silent**
+   - Files truncated by byte cap don't increment counter
+   - Model never learns context was withheld
+   - Fix: Emit a note to the model when files are skipped
+
+### Information Loss
+
+6. **commit.message fetched then discarded** — free historical signal already paid for
+7. **PR title/body/description fetched then discarded** — closest thing to stated intent
+8. **Finding deduplication keys on line only** — shifts across rebases re-report as :new
+9. **No GitHub pagination** — >100 changed files silently truncated
+
+### Output Quality
+
+10. **Clean PRs get a comment** — "Zacian review — no issues found"
+    - Article thesis: "silence is better than noise"
+    - Fix: Post nothing when findings list is empty
+
+11. **All findings post as inline comments** — no severity or confidence gate
+    - low-confidence notes pollute the PR
+    - Fix: Only post high/medium severity inline; low severity in summary only
+
+12. **RISK & BLAST RADIUS counts files with findings, not affected files**
+    - Misleading: claims analysis you don't perform
+    - Fix: Rename to "Files with Issues" or build actual impact analysis
+
+13. **Jira reference in UI with no client** — review_presenter.ex, reviewer_live.ex
+    - Fix: Remove UI reference if no integration planned for v1
+
+---
+
 ## Open Questions
 
 - **Agent implementation:** subprocess? container? API? (affects deployment, latency, cost)
@@ -126,22 +180,57 @@ reviews {
 - **Judge deduplication logic:** exact rules for "same finding"?
 - **Retry/error handling:** if an agent crashes, cancel review or mark incomplete?
 - **Graphify Graph:** still needed for v1, or defer to v2?
+- **Impact analysis:** when/how to detect callers, reverse deps, affected services/APIs?
+- **RAG/Retrieval:** vector search? embeddings? simple grep + LLM re-rank?
+- **Validation run:** Docker container? subprocess? API call to CI system?
 
 ---
 
-## Tech Stack (TBD)
+## Tech Stack (Locked)
 
-- **Language:** (Elixir? Python? Go? Node?)
-- **Webhook server:** (Express? Flask? Phoenix? http library?)
-- **Job queue:** (Redis? Bull? Sidekiq? In-process?)
-- **Database:** (PostgreSQL? SQLite? Firestore?)
-- **Agent execution:** (subprocess? Docker? API?)
+- **Language:** Elixir (Phoenix web framework)
+- **Webhook server:** Phoenix (Bandit HTTP adapter)
+- **Job queue:** TBD (Redis? In-process? Oban?)
+- **Database:** PostgreSQL (optional for v1, can mock)
+- **Agent execution:** Claude API (no subprocess/container in v1)
+
+---
+
+## Improvements Roadmap
+
+### Phase 1 (Now) — Fix Defects
+
+- [ ] Add payload size guard before Claude calls
+- [ ] Raise Judge output limit to ≥16k
+- [ ] Add code validation to prevent invented findings
+- [ ] Fail fast on diff_too_large (no retries)
+- [ ] Post nothing for clean PRs
+- [ ] Define severity levels (High/Medium/Low) in prompts
+- [ ] Add confidence gate for inline comments
+
+### Phase 2 (v1) — Add Context
+
+- [ ] Feed PR description + commit messages into context
+- [ ] Ingest repo docs (README, CONTRIBUTING.md, ADRs, AGENTS.md)
+- [ ] Give Reviewer context to Specialist + Judge stages
+- [ ] Add severity rubric to findings schema
+- [ ] Remove Jira UI references (or implement client)
+- [ ] Support GitHub pagination (>100 files)
+
+### Phase 3 (v2) — Impact & Validation
+
+- [ ] Add call graph / reverse dependency analysis
+- [ ] Implement deterministic security scanning (Gitleaks/Semgrep)
+- [ ] Surface actual test coverage data (not just file presence)
+- [ ] Build CODEOWNERS / ownership awareness
+- [ ] Implement validation run (tests, linters, scanners)
+- [ ] Add cross-repo awareness
 
 ---
 
 ## Next Steps
 
-1. Decide: which open questions need answering before you start building?
-2. Lock tech stack
-3. Sketch repo file structure
-4. Define agent output schema precisely
+1. **Implement Phase 1 defect fixes** — these unblock everything else
+2. **Verify context gap improvements** — PR description + docs feed (highest ROI on "flagging intentional code" failures)
+3. **Implement severity/confidence gates** — use to drive noise reduction
+4. **Decide v1 scope** — v1 or defer, this drives tech decisions for agents and storage

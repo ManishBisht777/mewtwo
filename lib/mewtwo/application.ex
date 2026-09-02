@@ -9,13 +9,14 @@ defmodule Mewtwo.Application do
   def start(_type, _args) do
     children = [
       MewtwoWeb.Telemetry,
-      # Mewtwo.Repo,
+      Mewtwo.Repo,
       {DNSCluster, query: Application.get_env(:mewtwo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Mewtwo.PubSub},
       # Start a worker by calling: Mewtwo.Worker.start_link(arg)
       # {Mewtwo.Worker, arg},
       # Start to serve requests, typically the last entry
-      MewtwoWeb.Endpoint
+      MewtwoWeb.Endpoint,
+      {Oban, Application.fetch_env!(:mewtwo, Oban)}
     ]
 
     # See https://elixir.hexdocs.pm/Supervisor.html

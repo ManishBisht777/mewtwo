@@ -1,4 +1,5 @@
 import Config
+config :mewtwo, Oban, testing: :manual
 
 # Configure your database
 #

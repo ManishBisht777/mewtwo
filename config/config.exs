@@ -7,6 +7,13 @@
 # General application configuration
 import Config
 
+config :mewtwo, Oban,
+  engine: Oban.Engines.Basic,
+  notifier: Oban.Notifiers.Postgres,
+  queues: [default: 10],
+  lifeline: [rescue_after: {2, :hours}],
+  repo: Mewtwo.Repo
+
 config :mewtwo,
   ecto_repos: [Mewtwo.Repo],
   generators: [timestamp_type: :utc_datetime]

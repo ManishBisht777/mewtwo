@@ -14,6 +14,10 @@ defmodule MewtwoWeb.Router do
     plug :accepts, ["json"]
   end
 
+   pipeline :webhook do
+    plug :accepts, ["json"]
+  end
+
   scope "/", MewtwoWeb do
     pipe_through :browser
 
