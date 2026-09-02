@@ -181,18 +181,25 @@
 - Error handling tested
 - 8 severity/confidence combinations validated
 
-### A2: Update Agent Prompts
+### A2: Update Agent Prompts ✅ COMPLETE
 **Depends on:** A1, C4, D5, G3
-**Files:** `lib/mewtwo/agents/prompts/*.md` (update)
-- [ ] Embed compressed diff in prompt
-- [ ] Embed dynamic context (callers, tests, config, docs)
-- [ ] Embed gitleaks findings
-- [ ] Add instruction: "Use tool agreement to increase confidence"
-- [ ] Add note about compression and skipped items
+**Files:** 
+- `lib/mewtwo/agents/prompts/system_prompt.md` (shared by all agents)
+- `lib/mewtwo/agents/prompts/bugs.md`
+- `lib/mewtwo/agents/prompts/perf.md`
+- `lib/mewtwo/agents/prompts/security.md`
+- `lib/mewtwo/agents/prompts/architecture.md`
+- `lib/mewtwo/agents/prompts/readability.md`
+- `lib/mewtwo/agents/agent_prompts.ex` (module to load/build prompts)
 
-**Acceptance:**
-- Agents receive all context (diff + dynamic context + gitleaks)
-- Prompts explicitly mention tool agreement scoring
+**Status:** ✅ Complete (22 tests passing)
+- [x] System prompt: shared instructions, output format, validation rules
+- [x] 5 specialized agent prompts (bugs, perf, security, architecture, readability)
+- [x] Each prompt includes: what to look for, severity/confidence guides, examples
+- [x] Tool agreement scoring explained (Gitleaks match = high confidence)
+- [x] Compression note included in all prompts
+- [x] agent_prompts module: loads prompts, formats context, builds full prompts
+- [x] All prompts embed: compressed diff + dynamic context + gitleaks findings
 
 ### A3: Agent Spawner
 **Depends on:** A2
