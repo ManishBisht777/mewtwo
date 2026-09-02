@@ -17,9 +17,12 @@ GitHub PR Labeled "initial-review"
 Webhook fires → Handler returns 202 (async)
     ↓
 Background Job: Fetch PR diff + context
+    ├─ Fetch changed files, commits, PR metadata
+    ├─ Apply COMPRESSION STRATEGY (smart truncation, summarization)
+    └─ Apply DYNAMIC CONTEXT (fetch callers, tests, configs on-demand)
     ↓
 Parallel Agents Run (config-driven, per-repo)
-    - Each agent analyzes diff against its domain
+    - Each agent analyzes compressed + enriched context
     - Returns: {file, line, severity, summary, details, confidence}
     ↓
 Judge Coordinator
@@ -31,8 +34,58 @@ Post to GitHub
     - Author Output: Inline comments on changed lines
     - Reviewer Output: Single summary comment
     ↓
-Store in DB: {review_id, pr_id, findings[], timestamp}
+Store in DB: {review_id, pr_id, findings[], context[], timestamp}
 ```
+
+---
+
+## Context Strategy (New)
+
+### Compression Strategy — Intelligent Context Reduction
+
+For large PRs (>50KB diffs or >100 files), apply compression to fit within token budget:
+
+**Techniques:**
+- **Line-level diff compression** — collapse unchanged context lines (keep 2-3 lines before/after change)
+- **File summarization** — for large files, summarize unchanged sections with comment blocks
+- **Pattern grouping** — group similar changes (e.g., 10 identical variable renames) into summaries
+- **Smart truncation** — prioritize:
+  1. Changed lines (100% inclusion)
+  2. Test files (modified tests → high signal)
+  3. Configuration changes (immediate impact)
+  4. Comments and docstrings (explain intent)
+  5. Context (lowest priority, truncate first)
+
+**Token budget:**
+- Haiku 4.5: 180K token limit
+- Reserve 20K for agent reasoning
+- Reserve 10K for findings output
+- **Available for context: 150K tokens max**
+- Compress if estimated context > 100K
+
+### Dynamic Context — Semantic Context Enrichment
+
+After fetching raw diff, intelligently pull additional context:
+
+**Stage 1: Parse Changed Symbols**
+- Extract function/method names, class names, module names from diff
+- Identify imports and dependencies
+
+**Stage 2: Fetch Related Context (on-demand)**
+- **Function callers** — fetch code that calls modified functions
+- **Test files** — fetch test files for modified modules
+- **Dependency files** — fetch package.json, go.mod, mix.exs (if changed)
+- **Configuration** — fetch env config, feature flags, schema files
+- **Documentation** — fetch README, CONTRIBUTING, API docs for context
+
+**Stage 3: Rank by Relevance**
+- Direct callers (direct dependencies) → high relevance
+- Transitive callers → medium relevance
+- Test coverage → high relevance
+- Comments in modified code → high relevance
+- Import statements → medium relevance
+
+**Budget-aware:** Stop fetching when token budget exhausted. Track what was fetched vs. skipped.
 
 ---
 
@@ -64,8 +117,31 @@ Store in DB: {review_id, pr_id, findings[], timestamp}
 ### 2. Job Queue
 
 - Store pending/running reviews
-- Track: {review_id, pr_id, status, timestamp, agent_results}
+- Track: {review_id, pr_id, status, timestamp, agent_results, context_metadata}
 - Trigger parallel agent runs
+
+### 2a. Context Compression Engine
+
+- **Input:** raw diff, changed files, full file contents
+- **Processing:**
+  - Estimate tokens for each file
+  - Apply line-level compression (context window around changes)
+  - Apply file summarization for large unchanged sections
+  - Group repetitive patterns
+- **Output:** compressed diff + metadata (bytes_saved, sections_compressed, sections_skipped)
+- **Integration:** runs before agents, fails gracefully if can't compress enough
+
+### 2b. Dynamic Context Fetcher
+
+- **Input:** changed file list, parsed symbols (functions, classes, modules)
+- **Processing:**
+  - Query code graph / grep for callers of modified functions
+  - Fetch related test files
+  - Fetch affected config files (if changed)
+  - Fetch documentation for modified modules
+  - Rank by relevance score
+- **Output:** enriched context {callers, tests, configs, docs} + token budget used
+- **Integration:** runs after compression, respects remaining token budget
 
 ### 3. Agents (Parallel)
 
@@ -125,7 +201,7 @@ reviews {
 1. **Payload size can exceed model context** (Haiku 4.5 = 200K token limit)
    - 400KB diff + 400KB file context ≈ 200–250k tokens
    - No guard check before calling Claude API
-   - Fix: Add size check against selected model, reject early if over limit
+   - Fix: **Apply COMPRESSION STRATEGY** before agent runs (not after). Estimate tokens early, compress if needed, emit note to model about what was skipped
 
 2. **Judge output budget is half Reviewer's** (8k vs 16k tokens)
    - Long finding lists truncate mid-tool-call → :no_tool_result
@@ -198,15 +274,18 @@ reviews {
 
 ## Improvements Roadmap
 
-### Phase 1 (Now) — Fix Defects
+### Phase 1 (Now) — Fix Defects + Add Core Context Strategy
 
-- [ ] Add payload size guard before Claude calls
+- [ ] **Implement COMPRESSION STRATEGY** (line-level, file summarization, pattern grouping)
+- [ ] **Implement DYNAMIC CONTEXT** (fetch callers, tests, configs on-demand)
+- [ ] Add payload size guard before Claude calls (use compression, not rejection)
 - [ ] Raise Judge output limit to ≥16k
 - [ ] Add code validation to prevent invented findings
 - [ ] Fail fast on diff_too_large (no retries)
 - [ ] Post nothing for clean PRs
 - [ ] Define severity levels (High/Medium/Low) in prompts
 - [ ] Add confidence gate for inline comments
+- [ ] Emit note to agents when context was compressed or skipped
 
 ### Phase 2 (v1) — Add Context
 

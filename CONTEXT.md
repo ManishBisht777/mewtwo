@@ -1,5 +1,31 @@
 # Code Review Agent System — Domain Language
 
+## Context Management
+
+### Compression Strategy
+
+A set of techniques to fit large PRs into token budgets without losing signal:
+
+1. **Line-level compression** — only include 2-3 lines of unchanged context around changes
+2. **File summarization** — replace large unchanged sections with summaries
+3. **Pattern grouping** — consolidate repetitive changes (e.g., "10 variable renames in file X")
+4. **Priority-based truncation** — keep changes first, then tests, then config, then documentation
+
+**Goal:** Reduce diff size 50-80% while preserving all signal needed for analysis.
+
+### Dynamic Context
+
+Additional context fetched *after* parsing the diff, based on what changed:
+
+- **Code dependencies** — fetch files that import/call the modified code
+- **Test coverage** — fetch test files for modified modules
+- **Configuration** — fetch env configs, feature flags affected by changes
+- **Documentation** — fetch READMEs and API docs related to changed modules
+
+**Goal:** Give agents the *right* context (not just more context). A caller of modified function is more valuable than 50 lines of unrelated code.
+
+---
+
 ## Core Concepts
 
 ### Pull Request (PR)
