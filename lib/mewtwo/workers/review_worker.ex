@@ -20,8 +20,6 @@ defmodule Mewtwo.Workers.ReviewWorker do
       }
       |> Repo.insert!()
 
-    IO.puts("Review started for PR ##{pr_number} in #{repo} (ID: #{review.id})")
-
     # TODO: Fetch PR context
     # TODO: Run agents in parallel
     # TODO: Call judge coordinator

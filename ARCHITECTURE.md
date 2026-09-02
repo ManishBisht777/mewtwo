@@ -4,7 +4,7 @@
 
 Zacian is a code review agent system that analyzes PRs across multiple specialized agents, coordinates findings through a judge, and posts actionable feedback to GitHub.
 
-**Entry Point:** PR labeled with `need-zacian-review`  
+**Entry Point:** PR labeled with `initial-review`  
 **Exit Point:** Inline comments (author feedback) + summary comment (reviewer risk assessment)
 
 ---
@@ -12,7 +12,7 @@ Zacian is a code review agent system that analyzes PRs across multiple specializ
 ## Core Flow
 
 ```
-GitHub PR Labeled "need-zacian-review"
+GitHub PR Labeled "initial-review"
     ↓
 Webhook fires → Handler returns 202 (async)
     ↓
@@ -57,7 +57,7 @@ Store in DB: {review_id, pr_id, findings[], timestamp}
 ### 1. Webhook Handler
 
 - Listen for GitHub label events
-- Validate event (is it `need-zacian-review` label?)
+- Validate event (is it `initial-review` label?)
 - Enqueue job, return 202
 - Handle: attach → start, remove → cancel, code-change → mark-stale
 

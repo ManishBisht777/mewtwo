@@ -25,10 +25,10 @@ defmodule MewtwoWeb.Router do
   end
 
   # Other scopes may use custom stacks.
-scope "/api", MewtwoWeb do
-  pipe_through :api
-  post "/github-app/webhook", WebhookController, :github_app_webhook
-end
+  scope "/api", MewtwoWeb do
+    pipe_through :webhook
+    post "/github-app/webhook", WebhookController, :github_app_webhook
+  end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:mewtwo, :dev_routes) do

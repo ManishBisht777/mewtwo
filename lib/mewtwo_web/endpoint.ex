@@ -43,6 +43,8 @@ defmodule MewtwoWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  plug :cache_raw_body
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
@@ -52,4 +54,13 @@ defmodule MewtwoWeb.Endpoint do
   plug Plug.Head
   plug Plug.Session, @session_options
   plug MewtwoWeb.Router
+
+  def cache_raw_body(conn, _opts) do
+    case Plug.Conn.read_body(conn, []) do
+      {:ok, body, conn} ->
+        Plug.Conn.put_private(conn, :raw_body, body)
+      {:more, _body, conn} ->
+        conn
+    end
+  end
 end
