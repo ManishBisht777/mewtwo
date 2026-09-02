@@ -201,18 +201,22 @@
 - [x] agent_prompts module: loads prompts, formats context, builds full prompts
 - [x] All prompts embed: compressed diff + dynamic context + gitleaks findings
 
-### A3: Agent Spawner
+### A3: Agent Spawner ✅ COMPLETE
 **Depends on:** A2
-**Files:** `lib/mewtwo/agents/spawner.ex`
-- [ ] Spawn 5-10 parallel agents (one per dimension: bugs, perf, security, etc.)
-- [ ] Pass compressed diff + context + gitleaks findings to each
-- [ ] Collect findings asynchronously
-- [ ] Return: `[agent_findings_1, ..., agent_findings_N]`
+**Files:** 
+- `lib/mewtwo/agents/spawner.ex` — spawns agents in parallel
+- `lib/mewtwo/bedrock_client.ex` — calls Claude via AWS Bedrock
+- Configuration: `.env` + `config/runtime.exs`
 
-**Acceptance:**
-- Successfully spawns N agents in parallel
-- Collects all findings
-- Timeout per agent: 60 seconds (configurable)
+**Status:** ✅ Complete (18 tests passing)
+- [x] Spawn 5-10 parallel agents using Task.async
+- [x] Pass compressed diff + context + gitleaks findings to each
+- [x] Collect findings asynchronously
+- [x] Return: {:ok, [agent_findings]} or {:ok, findings, errors: []}
+- [x] Bedrock client with AWS credential handling
+- [x] JSON parsing with AgentFinding validation
+- [x] Graceful error handling
+- [x] Timeout per agent: 60 seconds (configurable)
 
 ### J1: Judge Deduplication
 **Depends on:** A1, A3, G2

@@ -116,7 +116,15 @@ if config_env() == :prod do
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
+end
 
+# AWS Bedrock Configuration (all environments)
+config :mewtwo, :bedrock,
+  token: System.get_env("BEDROCK_TOKEN"),
+  model_id:
+    System.get_env("BEDROCK_MODEL_ID", "anthropic.claude-haiku-4-5")
+
+if config_env() == :prod do
   # ## Configuring the mailer
   #
   # In production you need to configure the mailer to use a different adapter.
