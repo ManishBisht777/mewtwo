@@ -12,43 +12,42 @@ defmodule Mewtwo.Compression.FileSummarizer do
   end
 
   # For each file in the diff:
-  # 1. Identify unchanged sections (no +/- prefix)
-  # 2. If unchanged section > 50 lines, replace with comment
-  # 3. Comment format: "... 123 unchanged lines (lines 450-573) ..."
-  # 4. Keep all changed lines intact
+  # 1. Identify runs of unchanged (context) lines
+  # 2. If a run exceeds the threshold, replace it with a marker
+  # 3. Keep shorter runs verbatim, along with every changed line and @@ header
+
+  @threshold 50
 
   defp summarize_file({file_header, hunk_lines}, _file_contents) do
-    summarized_lines = summarize_hunk_lines(hunk_lines, 50)
-    {file_header, summarized_lines}
+    {file_header, summarize_hunk_lines(hunk_lines, @threshold)}
   end
 
   defp summarize_hunk_lines(lines, threshold) do
-    summarize_hunk_lines(lines, [], 0, threshold)
+    lines
+    |> Enum.chunk_by(&collapsible?/1)
+    |> Enum.flat_map(&collapse_run(&1, threshold))
   end
 
-  defp summarize_hunk_lines([], result, unchanged_count, threshold) do
-    if unchanged_count > threshold do
-      result ++ ["// ... #{unchanged_count} unchanged lines ..."]
+  defp collapse_run([first | _] = run, threshold) do
+    if collapsible?(first) and length(run) > threshold do
+      # Rendered as a diff context line so it does not read as code the
+      # agents might report a finding against.
+      [" ... #{length(run)} unchanged lines ..."]
     else
-      result
+      run
     end
   end
 
-  defp summarize_hunk_lines([line | rest], result, unchanged_count, threshold) do
-    is_changed = String.starts_with?(line, "+") || String.starts_with?(line, "-")
-
-    if is_changed do
-      new_result =
-        if unchanged_count > threshold do
-          result ++ ["// ... #{unchanged_count} unchanged lines ..."]
-        else
-          result
-        end
-
-      summarize_hunk_lines(rest, new_result ++ [line], 0, threshold)
-    else
-      summarize_hunk_lines(rest, result, unchanged_count + 1, threshold)
-    end
+  # Changed lines and @@ hunk headers must always survive.
+  #
+  # The @@ header is the only place line numbers appear in a unified diff, and
+  # findings are reported by line — dropping it leaves agents no choice but to
+  # invent locations. Short runs of context are kept too: without the
+  # surrounding lines a function body reads as truncated, which reliably
+  # produces hallucinated "missing end" and misread-return findings.
+  defp collapsible?(line) do
+    not (String.starts_with?(line, "+") or String.starts_with?(line, "-") or
+           String.starts_with?(line, "@@"))
   end
 
   defp group_by_file(diff_lines) do

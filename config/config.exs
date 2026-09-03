@@ -10,7 +10,9 @@ import Config
 config :mewtwo, Oban,
   engine: Oban.Engines.Basic,
   notifier: Oban.Notifiers.Postgres,
-  queues: [default: 10],
+  # ReviewWorker runs on :reviews; without it declared here the queue only
+  # exists in dev.exs and review jobs are never processed in prod.
+  queues: [default: 10, reviews: 10],
   lifeline: [rescue_after: {2, :hours}],
   repo: Mewtwo.Repo
 

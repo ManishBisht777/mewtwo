@@ -78,7 +78,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       assert String.contains?(result, "+change2")
     end
 
-    test "small unchanged sections are not summarized" do
+    test "small unchanged sections are kept verbatim, not dropped" do
       diff = """
       --- a/file.ex
       +++ b/file.ex
@@ -92,11 +92,88 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
 
       result = FileSummarizer.summarize(diff, %{})
 
-      # Small sections should not be summarized
-      # The result should contain the added line
       assert String.contains?(result, "+added")
-      # The result should have some content
-      assert String.length(result) > 0
+      refute String.contains?(result, "unchanged lines")
+
+      # Context below the threshold must survive: agents need the surrounding
+      # lines to judge whether a function body is complete.
+      for line <- [" line 1", " line 2", " line 3", " line 5"] do
+        assert String.contains?(result, line), "dropped context line: #{inspect(line)}"
+      end
+    end
+
+    test "preserves @@ hunk headers" do
+      # The @@ header carries the only line numbers in a unified diff. Without
+      # it, agents have to invent the `line` field on every finding.
+      diff = """
+      --- a/file.ex
+      +++ b/file.ex
+      @@ -10,7 +10,8 @@ def existing_function do
+       context
+      +added
+      """
+
+      result = FileSummarizer.summarize(diff, %{})
+
+      assert String.contains?(result, "@@ -10,7 +10,8 @@")
+    end
+
+    test "preserves every hunk header when a file has several" do
+      diff = """
+      --- a/file.ex
+      +++ b/file.ex
+      @@ -1,3 +1,4 @@
+      +first
+      @@ -50,3 +51,4 @@
+      +second
+      @@ -90,3 +91,4 @@
+      +third
+      """
+
+      result = FileSummarizer.summarize(diff, %{})
+
+      assert String.contains?(result, "@@ -1,3 +1,4 @@")
+      assert String.contains?(result, "@@ -50,3 +51,4 @@")
+      assert String.contains?(result, "@@ -90,3 +91,4 @@")
+    end
+
+    test "a long context run collapses but the hunk header survives it" do
+      long_run = Enum.map_join(1..60, "\n", fn i -> " line #{i}" end)
+
+      diff = """
+      --- a/file.ex
+      +++ b/file.ex
+      @@ -1,65 +1,65 @@
+      #{long_run}
+      +added line
+      """
+
+      result = FileSummarizer.summarize(diff, %{})
+
+      assert String.contains?(result, "@@ -1,65 +1,65 @@")
+      assert String.contains?(result, "60 unchanged lines")
+      assert String.contains?(result, "+added line")
+      refute String.contains?(result, " line 30")
+    end
+
+    test "collapses only the runs that exceed the threshold" do
+      long_run = Enum.map_join(1..60, "\n", fn i -> " long #{i}" end)
+
+      diff = """
+      --- a/file.ex
+      +++ b/file.ex
+      @@ -1,70 +1,70 @@
+      #{long_run}
+      +added
+       short a
+       short b
+      """
+
+      result = FileSummarizer.summarize(diff, %{})
+
+      assert String.contains?(result, "60 unchanged lines")
+      assert String.contains?(result, " short a")
+      assert String.contains?(result, " short b")
     end
   end
 end

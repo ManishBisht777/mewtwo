@@ -76,4 +76,83 @@ defmodule Mewtwo.Compression.LineCompressorTest do
       assert String.contains?(result, "+new")
     end
   end
+
+  describe "file headers" do
+    test "a single-file diff is not swallowed whole" do
+      # parse_hunks used to drop every line before the first @@, which cost the
+      # first file its `--- a/` header and made the downstream file grouping
+      # discard it entirely — a one-file PR compressed to "".
+      diff = """
+      diff --git a/lib/only.ex b/lib/only.ex
+      index abc..def 100644
+      --- a/lib/only.ex
+      +++ b/lib/only.ex
+      @@ -10,6 +10,7 @@ defmodule Only do
+         def run do
+      +    boom = nil.field
+           :ok
+      """
+
+      result = LineCompressor.compress(diff)
+
+      assert String.contains?(result, "--- a/lib/only.ex")
+      assert String.contains?(result, "+++ b/lib/only.ex")
+      assert String.contains?(result, "@@ -10,6 +10,7 @@")
+      assert String.contains?(result, "+    boom = nil.field")
+    end
+
+    test "keeps the header of the first file when several files change" do
+      diff = """
+      --- a/first.ex
+      +++ b/first.ex
+      @@ -1,3 +1,4 @@
+      +first change
+      --- a/second.ex
+      +++ b/second.ex
+      @@ -1,3 +1,4 @@
+      +second change
+      """
+
+      result = LineCompressor.compress(diff)
+
+      assert String.contains?(result, "--- a/first.ex")
+      assert String.contains?(result, "--- a/second.ex")
+      assert String.contains?(result, "+first change")
+      assert String.contains?(result, "+second change")
+    end
+
+    test "keeps every @@ hunk header" do
+      diff = """
+      --- a/a.ex
+      +++ b/a.ex
+      @@ -1,3 +1,4 @@
+      +one
+      @@ -80,3 +81,4 @@
+      +two
+      """
+
+      result = LineCompressor.compress(diff)
+
+      assert String.contains?(result, "@@ -1,3 +1,4 @@")
+      assert String.contains?(result, "@@ -80,3 +81,4 @@")
+    end
+
+    test "preserves rename and new-file markers" do
+      diff = """
+      diff --git a/old.ex b/new.ex
+      similarity index 95%
+      rename from old.ex
+      rename to new.ex
+      --- a/old.ex
+      +++ b/new.ex
+      @@ -1,3 +1,4 @@
+      +change
+      """
+
+      result = LineCompressor.compress(diff)
+
+      assert String.contains?(result, "rename from old.ex")
+      assert String.contains?(result, "rename to new.ex")
+    end
+  end
 end

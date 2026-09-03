@@ -78,6 +78,26 @@ defmodule Mewtwo.Findings.AgentFinding do
   end
 
   @doc """
+  Convert a finding to a plain map for JSON storage
+
+  Atoms become strings so the value round-trips through a jsonb column
+  unchanged.
+  """
+  def to_map(%__MODULE__{} = finding) do
+    %{
+      "file" => finding.file,
+      "line" => finding.line,
+      "severity" => to_string(finding.severity),
+      "confidence" => to_string(finding.confidence),
+      "category" => finding.category,
+      "message" => finding.message,
+      "reasoning" => finding.reasoning,
+      "agent_name" => finding.agent_name,
+      "sources" => finding.sources
+    }
+  end
+
+  @doc """
   How many distinct sources reported this finding
 
   A finding surviving deduplication with a count above 1 was reported by
