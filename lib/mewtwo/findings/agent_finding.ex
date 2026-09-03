@@ -11,6 +11,9 @@ defmodule Mewtwo.Findings.AgentFinding do
     - message: short description (1 line)
     - reasoning: detailed explanation of the finding
     - agent_name: which agent found it (optional)
+    - sources: distinct sources that reported it, e.g. ["bugs", "gitleaks"].
+      Populated by the judge's deduplicator; `length(sources)` is the
+      "confirmed by N sources" count.
   """
 
   defstruct [
@@ -21,7 +24,8 @@ defmodule Mewtwo.Findings.AgentFinding do
     :category,
     :message,
     :reasoning,
-    agent_name: nil
+    agent_name: nil,
+    sources: []
   ]
 
   @type t :: %__MODULE__{
@@ -32,7 +36,8 @@ defmodule Mewtwo.Findings.AgentFinding do
     category: String.t(),
     message: String.t(),
     reasoning: String.t(),
-    agent_name: String.t() | nil
+    agent_name: String.t() | nil,
+    sources: [String.t()]
   }
 
   @doc "Validate severity is one of allowed values"
@@ -64,12 +69,21 @@ defmodule Mewtwo.Findings.AgentFinding do
          category: category,
          message: message,
          reasoning: reasoning,
-         agent_name: agent_name
+         agent_name: agent_name,
+         sources: Keyword.get(opts, :sources, [])
        }}
     else
       error -> error
     end
   end
+
+  @doc """
+  How many distinct sources reported this finding
+
+  A finding surviving deduplication with a count above 1 was reported by
+  more than one agent, or by an agent and a tool.
+  """
+  def source_count(%__MODULE__{sources: sources}), do: length(sources)
 
   defp validate_file(file) when is_binary(file) and byte_size(file) > 0, do: :ok
   defp validate_file(_), do: {:error, "file must be a non-empty string"}

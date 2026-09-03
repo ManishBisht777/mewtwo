@@ -221,10 +221,10 @@
 ### J1: Judge Deduplication
 **Depends on:** A1, A3, G2
 **Files:** `lib/mewtwo/judge/deduplicator.ex`
-- [ ] Receive: agent_findings[] + gitleaks_findings[]
-- [ ] Group by (file, line, category)
-- [ ] Keep one representative finding per group
-- [ ] Mark duplicates as "confirmed by N sources"
+- [x] Receive: agent_findings[] + gitleaks_findings[]
+- [x] Group by (file, line, category)
+- [x] Keep one representative finding per group
+- [x] Mark duplicates as "confirmed by N sources"
 
 **Acceptance:**
 - Input: 20 findings (5 duplicates) → Output: 15 deduplicated
@@ -233,12 +233,12 @@
 ### J2: Judge Confidence Scorer
 **Depends on:** J1
 **Files:** `lib/mewtwo/judge/confidence_scorer.ex`
-- [ ] Implement scoring rule:
+- [x] Implement scoring rule:
   - `high`: LLM + Gitleaks flag same issue
   - `medium`: LLM or Gitleaks only
   - `low`: uncertain findings
-- [ ] Attach confidence to each finding
-- [ ] Rank by severity + confidence
+- [x] Attach confidence to each finding
+- [x] Rank by severity + confidence
 
 **Acceptance:**
 - LLM + Gitleaks match (same file+line+category) → high confidence
@@ -248,10 +248,10 @@
 ### J3: Judge Finding Splitter
 **Depends on:** J2
 **Files:** `lib/mewtwo/judge/splitter.ex`
-- [ ] Split findings into two groups:
+- [x] Split findings into two groups:
   - **Author findings**: severity ∈ {high, medium} (actionable)
   - **Reviewer findings**: lower severity/confidence (context for humans)
-- [ ] Return: `{author_findings, reviewer_findings}`
+- [x] Return: `{author_findings, reviewer_findings}`
 
 **Acceptance:**
 - High/medium severity → author group
@@ -260,9 +260,9 @@
 ### J4: Judge Orchestrator
 **Depends on:** J1, J2, J3
 **Files:** `lib/mewtwo/judge.ex`
-- [ ] Orchestrate deduplication → confidence scoring → splitting
-- [ ] Return: `{author_findings, reviewer_findings, metadata}`
-- [ ] Metadata: total_agents, gitleaks_findings_count, dedup_count, tool_agreement_rate
+- [x] Orchestrate deduplication → confidence scoring → splitting
+- [x] Return: `{author_findings, reviewer_findings, metadata}`
+- [x] Metadata: total_agents, gitleaks_findings_count, dedup_count, tool_agreement_rate
 
 **Acceptance:**
 - E2E: Receive agent + gitleaks findings → output author + reviewer findings
