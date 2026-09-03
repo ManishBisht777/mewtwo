@@ -165,8 +165,37 @@ defmodule Mewtwo.GithubClientTest do
         |> json(403, %{"message" => "API rate limit exceeded"})
       end
 
-      assert {:error, {:rate_limited, "API rate limit exceeded"}} =
+      assert {:error, {:rate_limited, "API rate limit exceeded", seconds}} =
                GithubClient.get("/x", plug: plug)
+
+      # No reset header on this response, so it falls back to a minute.
+      assert seconds == 60
+    end
+
+    test "reports seconds until the quota resets" do
+      reset_at = System.os_time(:second) + 900
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "0")
+        |> Plug.Conn.put_resp_header("x-ratelimit-reset", to_string(reset_at))
+        |> json(403, %{"message" => "API rate limit exceeded"})
+      end
+
+      assert {:error, {:rate_limited, _, seconds}} = GithubClient.get("/x", plug: plug)
+      assert_in_delta seconds, 900, 5
+    end
+
+    test "prefers retry-after, which secondary limits use" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "0")
+        |> Plug.Conn.put_resp_header("retry-after", "45")
+        |> Plug.Conn.put_resp_header("x-ratelimit-reset", to_string(System.os_time(:second) + 900))
+        |> json(403, %{"message" => "Secondary rate limit"})
+      end
+
+      assert {:error, {:rate_limited, _, 45}} = GithubClient.get("/x", plug: plug)
     end
 
     test "maps a 403 that is not a rate limit to :unauthorized" do

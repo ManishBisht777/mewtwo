@@ -46,6 +46,28 @@ defmodule Mewtwo.Workers.ReviewWorkerTest do
     end
   end
 
+  describe "retry bookkeeping" do
+    test "reuses an unfinished review instead of inserting a duplicate on retry" do
+      old = System.get_env("GITHUB_TOKEN")
+      System.put_env("GITHUB_TOKEN", "definitely-not-a-valid-token")
+
+      on_exit(fn ->
+        if old, do: System.put_env("GITHUB_TOKEN", old), else: System.delete_env("GITHUB_TOKEN")
+      end)
+
+      # A snoozed or retried job runs perform/1 again for the same PR.
+      ReviewWorker.perform(%Oban.Job{args: @args})
+      first = Repo.one!(from r in Review)
+
+      # Put it back in a non-terminal state, as a snooze would.
+      first |> Review.changeset(%{status: "waiting"}) |> Repo.update!()
+
+      ReviewWorker.perform(%Oban.Job{args: @args})
+
+      assert Repo.aggregate(from(r in Review), :count) == 1
+    end
+  end
+
   describe "job configuration" do
     test "runs on the :reviews queue" do
       assert ReviewWorker.__opts__()[:queue] == :reviews

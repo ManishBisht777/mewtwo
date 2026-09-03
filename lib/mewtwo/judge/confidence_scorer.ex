@@ -66,6 +66,20 @@ defmodule Mewtwo.Judge.ConfidenceScorer do
     Enum.any?(sources, &tool_source?/1) and Enum.any?(sources, &(not tool_source?(&1)))
   end
 
+  defp log_summary(scored) do
+    breakdown =
+      scored
+      |> Enum.frequencies_by(& &1.confidence)
+      |> Enum.map_join(" ", fn {confidence, count} -> "#{confidence}=#{count}" end)
+
+    agreed = Enum.count(scored, &tool_agreement?/1)
+
+    Logger.info(
+      "[judge] scored #{length(scored)} findings: #{breakdown} " <>
+        "(#{agreed} with agent/tool agreement)"
+    )
+  end
+
   defp score_finding(%AgentFinding{} = finding) do
     %{finding | confidence: confidence_for(finding)}
   end
@@ -82,19 +96,4 @@ defmodule Mewtwo.Judge.ConfidenceScorer do
   # corroboration is what lifts a finding out of the uncertain bucket.
   defp uncertain?(%AgentFinding{confidence: :low, sources: sources}), do: length(sources) <= 1
   defp uncertain?(%AgentFinding{}), do: false
-
-
-  defp log_summary(scored) do
-    breakdown =
-      scored
-      |> Enum.frequencies_by(& &1.confidence)
-      |> Enum.map_join(" ", fn {confidence, count} -> "#{confidence}=#{count}" end)
-
-    agreed = Enum.count(scored, &tool_agreement?/1)
-
-    Logger.info(
-      "[judge] scored #{length(scored)} findings: #{breakdown} " <>
-        "(#{agreed} with agent/tool agreement)"
-    )
-  end
 end

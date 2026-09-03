@@ -4,11 +4,12 @@ defmodule Mewtwo.PRContext do
   require Logger
 
   alias Mewtwo.GithubClient
+  alias Mewtwo.TokenCounter
 
-  # Token budgets (approximate tokens per item)
-  @max_context_tokens 180_000
+  # Only rejects diffs so large that fetching and compressing them is a waste;
+  # anything smaller is trimmed to budget by Mewtwo.Compression.
+  @max_context_tokens 2_000_000
   @avg_tokens_per_file 500
-  @avg_tokens_per_diff_line 1
 
   def fetch(repo, pr_number) do
     Logger.info("Fetching PR context: #{repo}##{pr_number}")
@@ -83,8 +84,9 @@ defmodule Mewtwo.PRContext do
     end
   end
 
+  # Counting lines (the previous approach) undercounts a minified or lockfile
+  # diff by more than an order of magnitude, so the ceiling never fired.
   defp estimate_diff_tokens(diff_text) when is_binary(diff_text) do
-    lines = String.split(diff_text, "\n")
-    length(lines) * @avg_tokens_per_diff_line
+    TokenCounter.count_tokens(diff_text, :code)
   end
 end

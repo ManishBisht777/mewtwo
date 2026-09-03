@@ -15,6 +15,10 @@ defmodule Mewtwo.BedrockClient do
   on-demand `anthropic.*` IDs are rejected by the invoke endpoint.
   """
 
+  require Logger
+
+  alias Mewtwo.Cost
+
   # Anthropic's wire format version on Bedrock. Not the same string as the
   # direct Anthropic API's `anthropic-version` header.
   @anthropic_version "bedrock-2023-05-31"
@@ -26,11 +30,13 @@ defmodule Mewtwo.BedrockClient do
   @doc """
   Invoke Claude via AWS Bedrock
 
-  Returns: {:ok, response_text} or {:error, reason}
+  Returns `{:ok, response_text, usage}` or `{:error, reason}`, where usage is
+  a `Mewtwo.Cost` usage map taken from the response.
   """
   def invoke(prompt, timeout \\ 60_000) do
     case token() do
       nil ->
+        Logger.error("[bedrock] BEDROCK_TOKEN not configured")
         {:error, "BEDROCK_TOKEN not configured"}
 
       token ->
@@ -78,6 +84,13 @@ defmodule Mewtwo.BedrockClient do
       {"Authorization", "Bearer #{token}"}
     ]
 
+    Logger.debug(
+      "[bedrock] invoke #{model_id} in #{region}: #{byte_size(prompt)} byte prompt, " <>
+        "max_tokens=#{@max_tokens}, timeout=#{timeout}ms"
+    )
+
+    started = System.monotonic_time(:millisecond)
+
     with {:ok, response} <-
            Req.post(
              url,
@@ -85,23 +98,32 @@ defmodule Mewtwo.BedrockClient do
              json: body,
              receive_timeout: timeout
            ) do
-      handle_response(response)
+      handle_response(response, model_id, System.monotonic_time(:millisecond) - started)
     else
-      {:error, reason} -> {:error, "Request failed: #{inspect(reason)}"}
+      {:error, reason} ->
+        elapsed = System.monotonic_time(:millisecond) - started
+        Logger.error("[bedrock] request failed after #{elapsed}ms: #{inspect(reason)}")
+        {:error, "Request failed: #{inspect(reason)}"}
     end
   end
 
-  defp handle_response(%Req.Response{status: 200, body: response_body}) when is_map(response_body) do
+  defp handle_response(%Req.Response{status: 200, body: response_body}, model_id, elapsed_ms)
+       when is_map(response_body) do
     case response_body do
       %{"content" => [%{"text" => text} | _]} ->
-        {:ok, text}
+        usage = Cost.usage_from_response(response_body)
+        Logger.info("[bedrock] #{model_id} ok in #{elapsed_ms}ms: #{Cost.describe(usage)}")
+
+        {:ok, text, usage}
 
       data ->
         {:error, "Unexpected response format: #{inspect(data)}"}
     end
   end
 
-  defp handle_response(%Req.Response{status: status, body: body}) do
+  defp handle_response(%Req.Response{status: status, body: body}, model_id, elapsed_ms) do
+    Logger.warning("[bedrock] #{model_id} returned #{status} after #{elapsed_ms}ms")
+
     body_str =
       case body do
         b when is_map(b) -> Jason.encode!(b)
@@ -110,9 +132,5 @@ defmodule Mewtwo.BedrockClient do
       end
 
     {:error, "Bedrock returned #{status}: #{String.slice(body_str, 0..200)}"}
-  end
-
-  defp handle_response(response) do
-    {:error, "Unexpected response format: #{inspect(response)}"}
   end
 end

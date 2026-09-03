@@ -99,7 +99,9 @@ defmodule Mewtwo.GithubClient do
 
     reason =
       cond do
-        rate_limited?(response) -> {:rate_limited, message}
+        # Carries seconds-until-reset so callers can wait it out rather than
+        # burning retries on a limit that clears in minutes, not seconds.
+        rate_limited?(response) -> {:rate_limited, message, seconds_until_reset(response)}
         status in [401, 403] -> {:unauthorized, message}
         status == 404 -> {:not_found, message}
         true -> {:http_error, status, message}
@@ -111,6 +113,37 @@ defmodule Mewtwo.GithubClient do
 
   defp rate_limited?(%Req.Response{status: status} = response) do
     status in [403, 429] and Req.Response.get_header(response, "x-ratelimit-remaining") == ["0"]
+  end
+
+  # `retry-after` covers secondary limits; `x-ratelimit-reset` is an epoch
+  # second for the primary hourly quota. Falls back to a minute when neither
+  # header is present.
+  defp seconds_until_reset(response) do
+    with nil <- retry_after(response),
+         nil <- reset_at(response) do
+      60
+    else
+      seconds -> seconds
+    end
+  end
+
+  defp retry_after(response) do
+    with [value | _] <- Req.Response.get_header(response, "retry-after"),
+         {seconds, _} <- Integer.parse(value),
+         true <- seconds > 0 do
+      seconds
+    else
+      _ -> nil
+    end
+  end
+
+  defp reset_at(response) do
+    with [value | _] <- Req.Response.get_header(response, "x-ratelimit-reset"),
+         {epoch, _} <- Integer.parse(value) do
+      max(epoch - System.os_time(:second), 1)
+    else
+      _ -> nil
+    end
   end
 
   defp error_message(%{"message" => message}), do: message

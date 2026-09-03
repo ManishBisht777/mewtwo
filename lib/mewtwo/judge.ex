@@ -55,7 +55,23 @@ defmodule Mewtwo.Judge do
         "#{round(metadata.tool_agreement_rate * 100)}% tool agreement"
     )
 
+    log_group("author", author)
+    log_group("reviewer", reviewer)
+
     {author, reviewer, metadata}
+  end
+
+  defp log_group(_label, []), do: :ok
+
+  defp log_group(label, findings) do
+    Logger.info("[judge] #{label} findings:")
+
+    Enum.each(findings, fn finding ->
+      Logger.info(
+        "[judge]   #{finding.severity}/#{finding.confidence} #{finding.file}:#{finding.line} " <>
+          "[#{finding.category}] confirmed by #{Enum.join(finding.sources, "+")} — #{finding.message}"
+      )
+    end)
   end
 
   defp total_agents(agent_findings, opts) do

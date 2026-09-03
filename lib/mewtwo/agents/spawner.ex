@@ -12,9 +12,13 @@ defmodule Mewtwo.Agents.Spawner do
 
   require Logger
 
+  require Logger
+
   alias Mewtwo.Agents.AgentPrompts
   alias Mewtwo.Findings.AgentFinding
   alias Mewtwo.BedrockClient
+  alias Mewtwo.Cost
+  alias Mewtwo.TokenCounter
 
   @doc """
   Spawn agents in parallel and collect findings
@@ -27,32 +31,77 @@ defmodule Mewtwo.Agents.Spawner do
     - opts: keyword options
       - timeout: milliseconds (default 60000)
 
-  Returns:
-    - {:ok, findings} — all agents succeeded
-    - {:ok, findings, errors: []} — some agents failed but collected partial results
+  Returns `{:ok, findings, meta}` where meta is:
+
+    - `:usage` — token usage summed across every agent call
+    - `:errors` — one message per agent that failed (empty when all succeeded)
+    - `:per_agent` — `%{agent_name => %{findings: n, usage: usage}}`
   """
   def spawn_agents(agents, diff, context, gitleaks_findings, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 60_000)
+    started = System.monotonic_time(:millisecond)
 
-    agents
-    |> Enum.map(fn agent ->
-      Task.async(fn ->
-        run_agent(agent, diff, context, gitleaks_findings, timeout)
+    Logger.info(
+      "[agents] spawning #{length(agents)}: #{Enum.join(agents, ", ")} " <>
+        "(#{length(context)} context items, #{length(gitleaks_findings)} tool findings, " <>
+        "timeout #{timeout}ms)"
+    )
+
+    results =
+      agents
+      |> Enum.map(fn agent ->
+        Task.async(fn ->
+          run_agent(agent, diff, context, gitleaks_findings, timeout)
+        end)
       end)
-    end)
-    |> Task.await_many(timeout + 5_000)
-    |> collect_results()
+      |> Task.await_many(timeout + 5_000)
+
+    collect_results(results, agents, System.monotonic_time(:millisecond) - started)
   end
 
   defp run_agent(agent_name, diff, context, gitleaks_findings, timeout) do
+    started = System.monotonic_time(:millisecond)
     prompt = AgentPrompts.build_prompt(agent_name, diff, context, gitleaks_findings)
+    prompt_tokens = TokenCounter.count_tokens(prompt, :code)
 
+    Logger.info(
+      "[agent #{agent_name}] start: #{byte_size(prompt)} byte prompt, ~#{prompt_tokens} tokens"
+    )
+
+    if prompt_tokens > max_prompt_tokens() do
+      # Sending it anyway buys one 400 per agent and no review.
+      reason =
+        "prompt is ~#{prompt_tokens} tokens, over the #{max_prompt_tokens()} limit " <>
+          "(reduce the compression token budget)"
+
+      Logger.error("[agent #{agent_name}] skipped without calling the model: #{reason}")
+
+      {:error, agent_name, "Agent #{agent_name} skipped: #{reason}"}
+    else
+      invoke_agent(agent_name, prompt, timeout, started)
+    end
+  end
+
+  defp max_prompt_tokens do
+    :mewtwo
+    |> Application.get_env(:review, [])
+    |> Keyword.get(:max_prompt_tokens, 180_000)
+  end
+
+  defp invoke_agent(agent_name, prompt, timeout, started) do
     case BedrockClient.invoke(prompt, timeout) do
-      {:ok, response} ->
-        parse_findings(response, agent_name)
+      {:ok, response, usage} ->
+        elapsed = System.monotonic_time(:millisecond) - started
+        findings = parse_findings(response, agent_name)
+
+        log_agent_output(agent_name, findings, usage, response, elapsed)
+
+        {:ok, agent_name, findings, usage}
 
       {:error, reason} ->
-        {:error, "Agent #{agent_name} failed: #{reason}"}
+        elapsed = System.monotonic_time(:millisecond) - started
+        Logger.error("[agent #{agent_name}] failed after #{elapsed}ms: #{reason}")
+        {:error, agent_name, "Agent #{agent_name} failed: #{reason}"}
     end
   end
 
@@ -222,19 +271,72 @@ defmodule Mewtwo.Agents.Spawner do
 
   defp parse_confidence(_), do: :low
 
-  defp collect_results(results) do
-    {ok_findings, errors} =
-      Enum.reduce(results, {[], []}, fn
-        {:error, reason}, {ok, errs} -> {ok, errs ++ [reason]}
-        findings, {ok, errs} -> {ok ++ findings, errs}
+  defp log_agent_output(agent_name, findings, usage, response, elapsed_ms) do
+    Logger.info(
+      "[agent #{agent_name}] ok in #{elapsed_ms}ms: #{byte_size(response)} byte response, " <>
+        "#{Cost.describe(usage)} -> #{length(findings)} findings#{severity_breakdown(findings)}"
+    )
+
+    if findings == [] do
+      Logger.info("[agent #{agent_name}] reported no findings")
+    else
+      Enum.each(findings, fn finding ->
+        Logger.info(
+          "[agent #{agent_name}]   #{finding.severity}/#{finding.confidence} " <>
+            "#{finding.file}:#{finding.line} [#{finding.category}] #{finding.message}"
+        )
+
+        if finding.reasoning do
+          Logger.debug("[agent #{agent_name}]     #{finding.reasoning}")
+        end
+      end)
+    end
+  end
+
+  defp severity_breakdown([]), do: ""
+
+  defp severity_breakdown(findings) do
+    breakdown =
+      findings
+      |> Enum.frequencies_by(& &1.severity)
+      |> Enum.map_join(" ", fn {severity, count} -> "#{severity}=#{count}" end)
+
+    " (#{breakdown})"
+  end
+
+  defp collect_results(results, agents, elapsed_ms) do
+    findings =
+      Enum.flat_map(results, fn
+        {:ok, _agent, agent_findings, _usage} -> agent_findings
+        {:error, _agent, _reason} -> []
       end)
 
-    case errors do
-      [] ->
-        {:ok, ok_findings}
+    errors = for {:error, _agent, reason} <- results, do: reason
 
-      _ ->
-        {:ok, ok_findings, errors: errors}
-    end
+    usage =
+      results
+      |> Enum.flat_map(fn
+        {:ok, _agent, _findings, agent_usage} -> [agent_usage]
+        {:error, _agent, _reason} -> []
+      end)
+      |> Cost.total()
+
+    per_agent =
+      Map.new(results, fn
+        {:ok, agent, agent_findings, agent_usage} ->
+          {agent, %{findings: length(agent_findings), usage: agent_usage}}
+
+        {:error, agent, _reason} ->
+          {agent, %{findings: 0, usage: Cost.zero()}}
+      end)
+
+    Logger.info(
+      "[agents] done in #{elapsed_ms}ms: #{length(findings)} findings from " <>
+        "#{length(agents) - length(errors)}/#{length(agents)} agents, #{Cost.describe(usage)}"
+    )
+
+    Enum.each(errors, &Logger.error("[agents] #{&1}"))
+
+    {:ok, findings, %{usage: usage, errors: errors, per_agent: per_agent}}
   end
 end

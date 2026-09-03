@@ -1,4 +1,6 @@
 defmodule Mewtwo.DynamicContext do
+  require Logger
+
   alias Mewtwo.Context.{SymbolParser, CallerFinder, TestFinder, ConfigFinder}
   alias Mewtwo.TokenCounter
 
@@ -13,19 +15,29 @@ defmodule Mewtwo.DynamicContext do
   }
   """
   def fetch(diff_string, repo_path, token_budget \\ 15_000) do
+    Logger.info("[context] start: repo_path=#{repo_path}, budget=#{token_budget} tokens")
+
     # Step 1: Parse changed symbols
     symbols = SymbolParser.parse(diff_string)
 
-    # Step 2: Fetch all context
-    callers = CallerFinder.find_callers(
-      Map.get(symbols, :functions, []),
-      repo_path
+    Logger.info(
+      "[context] symbols: #{length(Map.get(symbols, :functions, []))} functions, " <>
+        "#{length(Map.get(symbols, :modules, []))} modules, " <>
+        "#{length(Map.get(symbols, :imports, []))} imports"
     )
 
-    tests = TestFinder.find_tests(
-      Map.get(symbols, :modules, []),
-      repo_path
-    )
+    # Step 2: Fetch all context
+    callers =
+      CallerFinder.find_callers(
+        Map.get(symbols, :functions, []),
+        repo_path
+      )
+
+    tests =
+      TestFinder.find_tests(
+        Map.get(symbols, :modules, []),
+        repo_path
+      )
 
     config = ConfigFinder.find_context(repo_path)
 
@@ -45,12 +57,26 @@ defmodule Mewtwo.DynamicContext do
         "✓ Fetched #{length(fetched)} items (#{tokens}/#{token_budget} tokens)."
       end
 
+    Logger.info(
+      "[context] done: #{length(fetched)} items fetched, #{length(skipped)} skipped, " <>
+        "#{tokens}/#{token_budget} tokens (#{by_type(fetched)})"
+    )
+
     %{
       fetched_context: fetched,
       skipped_items: skipped,
       tokens_used: tokens,
       budget_note: note
     }
+  end
+
+  # "caller=28 config=7 docs=3" — which context kinds survived the budget.
+  defp by_type([]), do: "none"
+
+  defp by_type(items) do
+    items
+    |> Enum.frequencies_by(&Map.get(&1, :type, "unknown"))
+    |> Enum.map_join(" ", fn {type, count} -> "#{type}=#{count}" end)
   end
 
   defp combine_context(callers, tests, config) do
@@ -88,6 +114,7 @@ defmodule Mewtwo.DynamicContext do
       items ++
         Enum.map(config.config_files, fn file ->
           content = File.read!(file)
+
           %{
             type: "config",
             file: file,

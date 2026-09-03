@@ -181,7 +181,11 @@ defmodule Mewtwo.Agents.SpawnerTest do
 
   describe "spawn_agents/5" do
     test "returns no findings for an empty agent list without calling the model" do
-      assert {:ok, []} = Spawner.spawn_agents([], "+def test do\n+end", [], [])
+      assert {:ok, [], meta} = Spawner.spawn_agents([], "+def test do\n+end", [], [])
+
+      assert meta.errors == []
+      assert meta.per_agent == %{}
+      assert meta.usage == Mewtwo.Cost.zero()
     end
   end
 end

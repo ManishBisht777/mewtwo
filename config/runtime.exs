@@ -125,6 +125,15 @@ config :mewtwo, :bedrock,
     System.get_env("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
   region: System.get_env("BEDROCK_REGION", "us-east-1")
 
+# Per-token rates for cost reporting. Bedrock is partner-operated and priced
+# separately from Anthropic's first-party API, so there is no safe default —
+# take the numbers for your BEDROCK_MODEL_ID from
+# https://aws.amazon.com/bedrock/pricing/. Unset means token counts are still
+# reported but cost is reported as unavailable.
+config :mewtwo, :bedrock_pricing,
+  input_usd_per_mtok: System.get_env("BEDROCK_INPUT_USD_PER_MTOK"),
+  output_usd_per_mtok: System.get_env("BEDROCK_OUTPUT_USD_PER_MTOK")
+
 if config_env() == :prod do
   # ## Configuring the mailer
   #

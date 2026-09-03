@@ -16,6 +16,14 @@ config :mewtwo, Oban,
   lifeline: [rescue_after: {2, :hours}],
   repo: Mewtwo.Repo
 
+# Review sizing. diff_token_budget caps the compressed diff (files are dropped
+# lowest-review-value first to fit); max_prompt_tokens is the per-agent ceiling
+# checked before any model call, and must stay under the model's context window
+# with room for the response.
+config :mewtwo, :review,
+  diff_token_budget: 100_000,
+  max_prompt_tokens: 180_000
+
 config :mewtwo,
   ecto_repos: [Mewtwo.Repo],
   generators: [timestamp_type: :utc_datetime]

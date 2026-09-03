@@ -36,10 +36,14 @@ defmodule Mewtwo.BedrockClientTest do
     end
 
     @tag :bedrock
-    test "invokes Claude and returns the response text" do
-      assert {:ok, text} = BedrockClient.invoke("Reply with exactly: OK", 30_000)
+    test "invokes Claude and returns the response text with usage" do
+      assert {:ok, text, usage} = BedrockClient.invoke("Reply with exactly: OK", 30_000)
       assert is_binary(text)
       assert text =~ "OK"
+
+      assert usage.input_tokens > 0
+      assert usage.output_tokens > 0
+      assert usage.calls == 1
     end
   end
 end
