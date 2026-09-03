@@ -1,61 +1,160 @@
 defmodule Mewtwo.GithubClient do
-  @moduledoc "GitHub API client with app authentication"
+  @moduledoc """
+  GitHub REST API client
+
+  Authenticates with `GITHUB_TOKEN` when one is set, and falls back to
+  anonymous access otherwise — which is enough to read public repositories
+  (60 requests/hour). A token is required for private repos, higher rate
+  limits, and any write (e.g. posting review comments).
+  """
 
   require Logger
 
   @github_api_url "https://api.github.com"
 
+  # Caps how far get_paginated/2 will follow Link: rel="next". 10 pages at
+  # GitHub's per_page=100 is 1000 items, well past any real PR's file count.
+  @default_max_pages 10
+
+  @default_headers [
+    {"Accept", "application/vnd.github+json"},
+    {"X-GitHub-Api-Version", "2022-11-28"}
+  ]
+
+  @doc """
+  GET a single API path
+
+  Options are passed through to `Req.get/2`. A `:headers` option is merged
+  over the default headers (case-insensitively), so callers can override
+  `Accept` to request an alternate media type such as a raw diff.
+
+  Returns `{:ok, body}` or `{:error, reason}`. Unlike a bare `Req.get/2`,
+  a non-2xx status is an error rather than a successful response carrying
+  an error payload.
+  """
   def get(path, opts \\ []) do
-    url = @github_api_url <> path
-    headers = auth_headers()
-
-    case Req.get(url, [headers: headers] ++ opts) do
-      {:ok, response} -> {:ok, response.body}
-      {:error, reason} -> {:error, reason}
+    with {:ok, response} <- do_get(@github_api_url <> path, opts) do
+      {:ok, response.body}
     end
   end
 
+  @doc """
+  GET an API path, following `Link: rel="next"` to collect pages
+
+  Options:
+    - `:max_pages` — stop after this many pages (default #{@default_max_pages})
+
+  Returns `{:ok, items}` with the pages concatenated, or `{:error, reason}`.
+
+  The page cap matters: pointed at a listing endpoint such as
+  `/pulls?state=closed`, an uncapped follow walks the repository's entire
+  history and can exhaust the hourly rate limit in a single call.
+  """
   def get_paginated(path, opts \\ []) do
-    url = @github_api_url <> path
-    headers = auth_headers()
+    {max_pages, req_opts} = Keyword.pop(opts, :max_pages, @default_max_pages)
 
-    case Req.get(url, [headers: headers] ++ opts) do
-      {:ok, response} ->
-        items = response.body
-        next_url = get_next_page_url(response.headers)
+    collect_pages(@github_api_url <> path, req_opts, [], max_pages)
+  end
 
-        if next_url do
-          case fetch_remaining_pages(next_url, headers, []) do
-            {:ok, remaining} -> {:ok, items ++ remaining}
-            error -> error
-          end
-        else
-          {:ok, items}
+  defp collect_pages(nil, _opts, acc, _remaining), do: {:ok, acc}
+
+  defp collect_pages(url, _opts, acc, 0) do
+    Logger.warning("GitHub pagination stopped at the page cap with #{length(acc)} items; " <>
+                     "next page would have been #{url}")
+
+    {:ok, acc}
+  end
+
+  defp collect_pages(url, opts, acc, remaining) do
+    with {:ok, response} <- do_get(url, opts),
+         {:ok, items} <- as_list(response.body, url) do
+      collect_pages(next_page_url(response.headers), opts, acc ++ items, remaining - 1)
+    end
+  end
+
+  defp as_list(body, _url) when is_list(body), do: {:ok, body}
+
+  defp as_list(body, url) do
+    {:error, {:unexpected_body, "expected a JSON array from #{url}, got #{type_of(body)}"}}
+  end
+
+  defp do_get(url, opts) do
+    {overrides, req_opts} = Keyword.pop(opts, :headers, [])
+    headers = merge_headers(@default_headers ++ auth_headers(), overrides)
+
+    case Req.get(url, [headers: headers] ++ req_opts) do
+      {:ok, response} -> check_status(response, url)
+      {:error, reason} -> {:error, {:request_failed, reason}}
+    end
+  end
+
+  # GitHub answers 401/403/404 with a 200-shaped JSON error body, so without
+  # this check a bad token or a missing PR flows downstream as if it succeeded.
+  defp check_status(%Req.Response{status: status} = response, _url) when status in 200..299 do
+    {:ok, response}
+  end
+
+  defp check_status(%Req.Response{status: status} = response, url) do
+    message = error_message(response.body)
+
+    reason =
+      cond do
+        rate_limited?(response) -> {:rate_limited, message}
+        status in [401, 403] -> {:unauthorized, message}
+        status == 404 -> {:not_found, message}
+        true -> {:http_error, status, message}
+      end
+
+    Logger.error("GitHub #{status} on #{url}: #{message}")
+    {:error, reason}
+  end
+
+  defp rate_limited?(%Req.Response{status: status} = response) do
+    status in [403, 429] and Req.Response.get_header(response, "x-ratelimit-remaining") == ["0"]
+  end
+
+  defp error_message(%{"message" => message}), do: message
+  defp error_message(body) when is_binary(body), do: String.slice(body, 0..200)
+  defp error_message(body), do: inspect(body, printable_limit: 200)
+
+  # Later entries win, compared case-insensitively, so a caller-supplied
+  # Accept replaces the default rather than being sent alongside it.
+  defp merge_headers(defaults, overrides) do
+    overridden =
+      overrides
+      |> Enum.map(fn {key, _} -> String.downcase(to_string(key)) end)
+      |> MapSet.new()
+
+    Enum.reject(defaults, fn {key, _} ->
+      MapSet.member?(overridden, String.downcase(to_string(key)))
+    end) ++ overrides
+  end
+
+  defp auth_headers do
+    case token() do
+      nil -> []
+      token -> [{"Authorization", "token #{token}"}]
+    end
+  end
+
+  # An unset *or blank* GITHUB_TOKEN must yield no Authorization header at all.
+  # Sending `token ` with an empty value gets a hard 401 from GitHub instead of
+  # being treated as an anonymous request.
+  defp token do
+    case System.get_env("GITHUB_TOKEN") do
+      nil ->
+        nil
+
+      value ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> trimmed
         end
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
-  defp fetch_remaining_pages(url, headers, acc) when url == nil, do: {:ok, acc}
-
-  defp fetch_remaining_pages(url, headers, acc) do
-    case Req.get(url, headers: headers) do
-      {:ok, response} ->
-        items = response.body
-        next_url = get_next_page_url(response.headers)
-        fetch_remaining_pages(next_url, headers, acc ++ items)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp get_next_page_url(headers) do
-    headers
-    |> Enum.find(fn {k, _} -> String.downcase(k) == "link" end)
-    |> case do
+  defp next_page_url(headers) do
+    case Enum.find(headers, fn {key, _} -> String.downcase(key) == "link" end) do
       {_, link_header} -> parse_next_link(link_header)
       nil -> nil
     end
@@ -63,9 +162,11 @@ defmodule Mewtwo.GithubClient do
 
   defp parse_next_link(link_header) do
     link_header
+    |> List.wrap()
+    |> Enum.join(",")
     |> String.split(",")
     |> Enum.find_value(fn link ->
-      if String.contains?(link, "rel=\"next\"") do
+      if String.contains?(link, ~s(rel="next")) do
         case Regex.run(~r/<(.+?)>/, link) do
           [_, url] -> url
           _ -> nil
@@ -74,14 +175,7 @@ defmodule Mewtwo.GithubClient do
     end)
   end
 
-  defp auth_headers do
-    token = System.get_env("GITHUB_TOKEN")
-    accept = "application/vnd.github+json"
-
-    [
-      {"Accept", accept},
-      {"Authorization", "token #{token}"},
-      {"X-GitHub-Api-Version", "2022-11-28"}
-    ]
-  end
+  defp type_of(body) when is_map(body), do: "a JSON object"
+  defp type_of(body) when is_binary(body), do: "a #{byte_size(body)}-byte string"
+  defp type_of(body), do: inspect(body, printable_limit: 100)
 end

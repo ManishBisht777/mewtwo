@@ -65,11 +65,21 @@ defmodule Mewtwo.PRContext do
   end
 
   defp fetch_diff(repo, pr_number) do
-    case GithubClient.get("/repos/#{repo}/pulls/#{pr_number}", [
-      headers: [{"Accept", "application/vnd.github.v3.raw"}]
-    ]) do
-      {:ok, diff_text} when is_binary(diff_text) -> {:ok, diff_text}
-      error -> error
+    # The .diff media type returns a unified diff; .raw / the default JSON type
+    # return the PR object instead, which cannot be compressed downstream.
+    case GithubClient.get("/repos/#{repo}/pulls/#{pr_number}",
+           headers: [{"Accept", "application/vnd.github.v3.diff"}]
+         ) do
+      {:ok, diff_text} when is_binary(diff_text) ->
+        {:ok, diff_text}
+
+      # Never pass a non-diff body through as {:ok, _}: it would satisfy the
+      # `with` above and set context.diff to a map.
+      {:ok, other} ->
+        {:error, {:unexpected_diff_body, "expected a unified diff, got #{inspect(other, printable_limit: 200)}"}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -77,6 +87,4 @@ defmodule Mewtwo.PRContext do
     lines = String.split(diff_text, "\n")
     length(lines) * @avg_tokens_per_diff_line
   end
-
-  defp estimate_diff_tokens(_), do: 0
 end

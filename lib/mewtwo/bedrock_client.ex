@@ -2,10 +2,26 @@ defmodule Mewtwo.BedrockClient do
   @moduledoc """
   AWS Bedrock client for invoking Claude models
 
-  Requires Bedrock token configured in:
-  - BEDROCK_TOKEN (API token for authentication)
-  - Optional: BEDROCK_MODEL_ID (default: anthropic.claude-3-5-sonnet-20241022-v2:0)
+  Authenticates with a Bedrock API key (long-lived bearer token, `ABSK...`)
+  rather than SigV4 credentials, so requests are plain HTTP + `Authorization: Bearer`.
+
+  Configuration (env vars, loaded from `.env` by :dotenv):
+  - BEDROCK_TOKEN — required, the Bedrock API key
+  - BEDROCK_MODEL_ID — inference profile ID (default: us.anthropic.claude-opus-4-5-20251101-v1:0)
+  - BEDROCK_REGION — default: us-east-1
+
+  Note that BEDROCK_MODEL_ID must be a full inference profile ID such as
+  `us.anthropic.claude-opus-4-5-20251101-v1:0`. Bare model names and
+  on-demand `anthropic.*` IDs are rejected by the invoke endpoint.
   """
+
+  # Anthropic's wire format version on Bedrock. Not the same string as the
+  # direct Anthropic API's `anthropic-version` header.
+  @anthropic_version "bedrock-2023-05-31"
+
+  @default_model_id "us.anthropic.claude-opus-4-5-20251101-v1:0"
+  @default_region "us-east-1"
+  @max_tokens 4096
 
   @doc """
   Invoke Claude via AWS Bedrock
@@ -13,24 +29,42 @@ defmodule Mewtwo.BedrockClient do
   Returns: {:ok, response_text} or {:error, reason}
   """
   def invoke(prompt, timeout \\ 60_000) do
-    token = System.get_env("BEDROCK_TOKEN")
-    model_id = System.get_env("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-
-    case token do
+    case token() do
       nil ->
         {:error, "BEDROCK_TOKEN not configured"}
 
       token ->
-        make_request(prompt, token, model_id, timeout)
+        make_request(prompt, token, model_id(), region(), timeout)
     end
   end
 
-  defp make_request(prompt, token, model_id, timeout) do
-    url = "https://bedrock.us-east-1.amazonaws.com/model/#{model_id}/invoke"
+  defp token do
+    System.get_env("BEDROCK_TOKEN") || config(:token)
+  end
+
+  defp model_id do
+    System.get_env("BEDROCK_MODEL_ID") || config(:model_id) || @default_model_id
+  end
+
+  defp region do
+    System.get_env("BEDROCK_REGION") || config(:region) || @default_region
+  end
+
+  defp config(key) do
+    :mewtwo
+    |> Application.get_env(:bedrock, [])
+    |> Keyword.get(key)
+  end
+
+  defp make_request(prompt, token, model_id, region, timeout) do
+    # Invoke lives on the bedrock-runtime host; plain `bedrock.` is the
+    # control plane and answers with UnknownOperationException.
+    url =
+      "https://bedrock-runtime.#{region}.amazonaws.com/model/#{URI.encode_www_form(model_id)}/invoke"
 
     body = %{
-      anthropic_version: "bedrock-2023-06-01",
-      max_tokens: 4096,
+      anthropic_version: @anthropic_version,
+      max_tokens: @max_tokens,
       messages: [
         %{
           role: "user",

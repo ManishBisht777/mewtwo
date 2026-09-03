@@ -122,7 +122,8 @@ end
 config :mewtwo, :bedrock,
   token: System.get_env("BEDROCK_TOKEN"),
   model_id:
-    System.get_env("BEDROCK_MODEL_ID", "anthropic.claude-haiku-4-5")
+    System.get_env("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
+  region: System.get_env("BEDROCK_REGION", "us-east-1")
 
 if config_env() == :prod do
   # ## Configuring the mailer

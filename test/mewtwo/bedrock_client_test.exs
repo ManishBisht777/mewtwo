@@ -2,47 +2,44 @@ defmodule Mewtwo.BedrockClientTest do
   use ExUnit.Case
   alias Mewtwo.BedrockClient
 
+  # Runs the given function with BEDROCK_TOKEN unset, so `invoke/2` short-circuits
+  # before making a (billed) network call.
+  defp without_token(fun) do
+    old_token = System.get_env("BEDROCK_TOKEN")
+
+    try do
+      System.delete_env("BEDROCK_TOKEN")
+      fun.()
+    after
+      if old_token, do: System.put_env("BEDROCK_TOKEN", old_token)
+    end
+  end
+
   describe "invoke/2" do
     test "returns error when BEDROCK_TOKEN not configured" do
-      old_token = System.get_env("BEDROCK_TOKEN")
-
-      try do
-        System.delete_env("BEDROCK_TOKEN")
-
-        result = BedrockClient.invoke("test prompt")
-
-        assert {:error, reason} = result
+      without_token(fn ->
+        assert {:error, reason} = BedrockClient.invoke("test prompt")
         assert String.contains?(reason, "BEDROCK_TOKEN not configured")
-      after
-        if old_token, do: System.put_env("BEDROCK_TOKEN", old_token)
-      end
+      end)
+    end
+
+    test "accepts an explicit timeout" do
+      without_token(fn ->
+        assert {:error, _} = BedrockClient.invoke("test", 5_000)
+      end)
+    end
+
+    test "has a default timeout" do
+      without_token(fn ->
+        assert {:error, _} = BedrockClient.invoke("test prompt")
+      end)
     end
 
     @tag :bedrock
-    test "invokes Claude and returns response when token available" do
-      if System.get_env("BEDROCK_TOKEN") do
-        prompt = "Return this exact JSON: [{\"file\": \"test.ex\", \"line\": 1, \"severity\": \"high\"}]"
-
-        result = BedrockClient.invoke(prompt, 30_000)
-
-        assert (match?({:ok, _}, result) or match?({:error, _}, result))
-      else
-        :skip
-      end
-    end
-
-    test "accepts timeout option" do
-      timeout_ms = 5000
-
-      result = BedrockClient.invoke("test", timeout_ms)
-
-      assert {:error, _} = result
-    end
-
-    test "handles default timeout" do
-      result = BedrockClient.invoke("test prompt")
-
-      assert {:error, _} = result
+    test "invokes Claude and returns the response text" do
+      assert {:ok, text} = BedrockClient.invoke("Reply with exactly: OK", 30_000)
+      assert is_binary(text)
+      assert text =~ "OK"
     end
   end
 end
