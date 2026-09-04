@@ -125,7 +125,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
   end
 
   defp compress(%{diff: diff}) do
-    {compressed, meta} = Compression.compress(diff, %{}, diff_token_budget())
+    {compressed, meta} = Compression.compress(diff, diff_token_budget())
 
     Logger.info(
       "[review] stage :compress ok: #{meta.original_tokens} -> #{meta.compressed_tokens} tokens " <>

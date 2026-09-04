@@ -2,11 +2,11 @@ defmodule Mewtwo.Compression.FileSummarizer do
   @doc """
   Replaces large unchanged sections with summaries
   """
-  def summarize(compressed_diff, file_contents) do
+  def summarize(compressed_diff) do
     compressed_diff
     |> String.split("\n")
     |> group_by_file()
-    |> Enum.map(&summarize_file(&1, file_contents))
+    |> Enum.map(&summarize_file/1)
     |> Enum.flat_map(fn {header, lines} -> [header | lines] end)
     |> Enum.join("\n")
   end
@@ -18,7 +18,7 @@ defmodule Mewtwo.Compression.FileSummarizer do
 
   @threshold 50
 
-  defp summarize_file({file_header, hunk_lines}, _file_contents) do
+  defp summarize_file({file_header, hunk_lines}) do
     {file_header, summarize_hunk_lines(hunk_lines, @threshold)}
   end
 

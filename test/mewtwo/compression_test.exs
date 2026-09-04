@@ -2,9 +2,9 @@ defmodule Mewtwo.CompressionTest do
   use ExUnit.Case
   alias Mewtwo.Compression
 
-  describe "compress/3" do
+  describe "compress/2" do
     test "handles empty diff" do
-      {result, metadata} = Compression.compress("", %{})
+      {result, metadata} = Compression.compress("")
 
       assert result == ""
       assert metadata.original_tokens == 0
@@ -20,7 +20,7 @@ defmodule Mewtwo.CompressionTest do
       +new line
       """
 
-      {result, metadata} = Compression.compress(diff, %{})
+      {result, metadata} = Compression.compress(diff)
 
       assert is_binary(result)
       assert Map.has_key?(metadata, :original_tokens)
@@ -33,7 +33,7 @@ defmodule Mewtwo.CompressionTest do
     test "compression reduces or maintains size" do
       diff = generate_sample_diff(5000)
 
-      {_result, metadata} = Compression.compress(diff, %{})
+      {_result, metadata} = Compression.compress(diff)
 
       # Compression should not increase size
       assert metadata.compressed_tokens <= metadata.original_tokens
@@ -43,7 +43,7 @@ defmodule Mewtwo.CompressionTest do
       diff = generate_sample_diff(50_000)
       budget = 10_000
 
-      {_result, metadata} = Compression.compress(diff, %{}, budget)
+      {_result, metadata} = Compression.compress(diff, budget)
 
       # If over budget, should truncate
       assert metadata.compressed_tokens <= budget or metadata.compressed_tokens <= metadata.original_tokens
@@ -52,7 +52,7 @@ defmodule Mewtwo.CompressionTest do
     test "metadata is accurate" do
       diff = generate_sample_diff(5000)
 
-      {_result, metadata} = Compression.compress(diff, %{})
+      {_result, metadata} = Compression.compress(diff)
 
       assert metadata.original_tokens > 0
       assert metadata.compressed_tokens >= 0
@@ -65,7 +65,7 @@ defmodule Mewtwo.CompressionTest do
       # With default budget, should not truncate small diffs
       diff = generate_sample_diff(10_000)
 
-      {_result, metadata} = Compression.compress(diff, %{})
+      {_result, metadata} = Compression.compress(diff)
 
       # Tokens should be under 100K
       assert metadata.compressed_tokens < 100_000
@@ -74,7 +74,7 @@ defmodule Mewtwo.CompressionTest do
     test "handles large diffs" do
       diff = generate_sample_diff(50_000)
 
-      {_result, metadata} = Compression.compress(diff, %{})
+      {_result, metadata} = Compression.compress(diff)
 
       assert metadata.original_tokens > 0
       assert metadata.compressed_tokens >= 0
@@ -83,7 +83,7 @@ defmodule Mewtwo.CompressionTest do
     test "stages are applied in order" do
       diff = generate_sample_diff(10_000)
 
-      {_result, metadata} = Compression.compress(diff, %{})
+      {_result, metadata} = Compression.compress(diff)
 
       stages = metadata.stages_applied
       assert is_list(stages)

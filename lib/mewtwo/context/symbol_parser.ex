@@ -4,41 +4,17 @@ defmodule Mewtwo.Context.SymbolParser do
     lines = String.split(diff_string, "\n")
 
     %{
-      functions: extract_functions(lines),
-      modules: extract_modules(lines),
-      imports: extract_imports(lines)
+      functions: extract(lines, ~r/def[p]?\s+(\w+)/),
+      modules: extract(lines, ~r/defmodule\s+([A-Z]\w*)/),
+      imports: extract(lines, ~r/(?:import|alias)\s+([A-Z][\w.]*)/)
     }
   end
 
-  defp extract_functions(lines) do
+  defp extract(lines, regex) do
     lines
     |> Enum.filter(&is_changed/1)
     |> Enum.flat_map(fn line ->
-      case Regex.run(~r/def[p]?\s+(\w+)/, line) do
-        [_, name] -> [name]
-        nil -> []
-      end
-    end)
-    |> Enum.uniq()
-  end
-
-  defp extract_modules(lines) do
-    lines
-    |> Enum.filter(&is_changed/1)
-    |> Enum.flat_map(fn line ->
-      case Regex.run(~r/defmodule\s+([A-Z]\w*)/, line) do
-        [_, name] -> [name]
-        nil -> []
-      end
-    end)
-    |> Enum.uniq()
-  end
-
-  defp extract_imports(lines) do
-    lines
-    |> Enum.filter(&is_changed/1)
-    |> Enum.flat_map(fn line ->
-      case Regex.run(~r/(?:import|alias)\s+([A-Z][\w.]*)/, line) do
+      case Regex.run(regex, line) do
         [_, name] -> [name]
         nil -> []
       end

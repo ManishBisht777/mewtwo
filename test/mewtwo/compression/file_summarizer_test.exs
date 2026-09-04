@@ -2,9 +2,9 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
   use ExUnit.Case
   alias Mewtwo.Compression.FileSummarizer
 
-  describe "summarize/2" do
+  describe "summarize/1" do
     test "empty diff" do
-      assert FileSummarizer.summarize("", %{}) == ""
+      assert FileSummarizer.summarize("") == ""
     end
 
     test "replaces large unchanged sections with summaries" do
@@ -20,7 +20,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       #{unchanged_lines}
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       # Result should contain summary comment for large unchanged sections
       assert String.contains?(result, "unchanged lines")
@@ -37,7 +37,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
        line 4
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       # Changed lines should be kept
       assert String.contains?(result, "-old line")
@@ -52,7 +52,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       +new
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "--- a/lib/module.ex")
       assert String.contains?(result, "+++ b/lib/module.ex")
@@ -70,7 +70,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       +change2
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "file1.ex")
       assert String.contains?(result, "file2.ex")
@@ -90,7 +90,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
        line 5
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "+added")
       refute String.contains?(result, "unchanged lines")
@@ -113,7 +113,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       +added
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "@@ -10,7 +10,8 @@")
     end
@@ -130,7 +130,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       +third
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "@@ -1,3 +1,4 @@")
       assert String.contains?(result, "@@ -50,3 +51,4 @@")
@@ -148,7 +148,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
       +added line
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "@@ -1,65 +1,65 @@")
       assert String.contains?(result, "60 unchanged lines")
@@ -169,7 +169,7 @@ defmodule Mewtwo.Compression.FileSummarizerTest do
        short b
       """
 
-      result = FileSummarizer.summarize(diff, %{})
+      result = FileSummarizer.summarize(diff)
 
       assert String.contains?(result, "60 unchanged lines")
       assert String.contains?(result, " short a")

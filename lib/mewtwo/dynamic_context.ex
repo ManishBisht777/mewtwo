@@ -79,61 +79,30 @@ defmodule Mewtwo.DynamicContext do
     |> Enum.map_join(" ", fn {type, count} -> "#{type}=#{count}" end)
   end
 
+  # Order matters: rank_by_relevance/1 breaks score ties by input order, so
+  # callers -> tests -> config -> docs decides which items survive the budget.
   defp combine_context(callers, tests, config) do
-    items = []
-
-    # Add callers
-    items =
-      items ++
-        Enum.flat_map(callers, fn {func, caller_list} ->
-          Enum.map(caller_list, fn {file, line, depth} ->
-            %{
-              type: "caller",
-              func: func,
-              file: file,
-              line: line,
-              depth: depth,
-              content: "#{func} called in #{file}:#{line}"
-            }
-          end)
-        end)
-
-    # Add tests
-    items =
-      items ++
-        Enum.map(tests, fn {file, content} ->
+    Enum.concat([
+      Enum.flat_map(callers, fn {func, caller_list} ->
+        Enum.map(caller_list, fn {file, line, depth} ->
           %{
-            type: "test",
+            type: "caller",
+            func: func,
             file: file,
-            content: content
+            line: line,
+            depth: depth,
+            content: "#{func} called in #{file}:#{line}"
           }
         end)
-
-    # Add config
-    items =
-      items ++
-        Enum.map(config.config_files, fn file ->
-          content = File.read!(file)
-
-          %{
-            type: "config",
-            file: file,
-            content: content
-          }
-        end)
-
-    # Add docs
-    items =
-      items ++
-        Enum.map(config.docs, fn {file, content} ->
-          %{
-            type: "docs",
-            file: file,
-            content: content
-          }
-        end)
-
-    items
+      end),
+      Enum.map(tests, fn {file, content} -> %{type: "test", file: file, content: content} end),
+      Enum.map(config.config_files, fn file ->
+        %{type: "config", file: file, content: File.read!(file)}
+      end),
+      Enum.map(config.docs, fn {file, content} ->
+        %{type: "docs", file: file, content: content}
+      end)
+    ])
   end
 
   defp rank_by_relevance(items) do
@@ -153,15 +122,18 @@ defmodule Mewtwo.DynamicContext do
   defp calculate_score(_), do: 10
 
   defp budget_aware_fetch(ranked_items, budget) do
-    Enum.reduce(ranked_items, {[], [], 0}, fn item, {fetched, skipped, tokens} ->
-      item_tokens = TokenCounter.count_tokens(item.content, :code)
-      new_tokens = tokens + item_tokens
+    {fetched, skipped, tokens} =
+      Enum.reduce(ranked_items, {[], [], 0}, fn item, {fetched, skipped, tokens} ->
+        item_tokens = TokenCounter.count_tokens(item.content, :code)
+        new_tokens = tokens + item_tokens
 
-      if new_tokens <= budget do
-        {fetched ++ [item], skipped, new_tokens}
-      else
-        {fetched, skipped ++ [item], tokens}
-      end
-    end)
+        if new_tokens <= budget do
+          {[item | fetched], skipped, new_tokens}
+        else
+          {fetched, [item | skipped], tokens}
+        end
+      end)
+
+    {Enum.reverse(fetched), Enum.reverse(skipped), tokens}
   end
 end

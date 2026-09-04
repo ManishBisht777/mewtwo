@@ -37,3 +37,10 @@ npm-debug.log
 
 .env
 .env.local
+
+# Private keys — a committed GitHub App .pem lets anyone mint installation tokens.
+*.pem
+
+# Local tool state; .claude/settings.local.json can hold live API tokens.
+/.claude/
+/.elixir_ls/

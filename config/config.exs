@@ -28,9 +28,7 @@ config :mewtwo, :review,
   max_prompt_tokens: 180_000,
   post_to_github: true
 
-config :mewtwo,
-  ecto_repos: [Mewtwo.Repo],
-  generators: [timestamp_type: :utc_datetime]
+config :mewtwo, ecto_repos: [Mewtwo.Repo]
 
 # Configure the endpoint
 config :mewtwo, MewtwoWeb.Endpoint,
@@ -47,15 +45,6 @@ config :mewtwo, MewtwoWeb.Endpoint,
 config :phoenix_live_view,
   # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
   root_tag_attribute: "phx-r"
-
-# Configure the mailer
-#
-# By default it uses the "Local" adapter which stores the emails
-# locally. You can see the emails in your browser, at "/dev/mailbox".
-#
-# For production it's recommended to configure a different adapter
-# at the `config/runtime.exs`.
-config :mewtwo, Mewtwo.Mailer, adapter: Swoosh.Adapters.Local
 
 # Configure esbuild (the version is required)
 config :esbuild,

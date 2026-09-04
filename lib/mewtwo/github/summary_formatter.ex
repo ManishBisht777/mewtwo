@@ -37,7 +37,7 @@ defmodule Mewtwo.Github.SummaryFormatter do
   `metadata` is `Judge.judge/3`'s metadata map, optionally extended with:
 
     * `:usage` — a `Mewtwo.Cost` usage map
-    * `:compression` — `Mewtwo.Compression.compress/3`'s metadata
+    * `:compression` — `Mewtwo.Compression.compress/2`'s metadata
     * `:context` — `Mewtwo.DynamicContext.fetch/3`'s result, or the counts
       alone as `%{fetched: n, skipped: n, tokens_used: n}`, or `nil` when the
       stage was skipped

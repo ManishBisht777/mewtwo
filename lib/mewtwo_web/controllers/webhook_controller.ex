@@ -2,34 +2,30 @@ defmodule MewtwoWeb.WebhookController do
   use MewtwoWeb, :controller
 
   alias Mewtwo.Workers.ReviewWorker
-  alias Oban
+
+  @label "initial-review"
 
   def github_app_webhook(conn, _params) do
     body = conn.private[:raw_body] || ""
-
-    signature =
-      Enum.find_value(conn.req_headers, fn {k, v} ->
-        if k == "x-hub-signature-256" do
-          v
-        end
-      end)
+    signature = List.first(get_req_header(conn, "x-hub-signature-256"))
 
     if Mewtwo.GithubApp.verify_webhook_signature(body, signature) do
       {:ok, payload} = Jason.decode(body)
 
-      if payload["action"] == "labeled" and payload["label"]["name"] == "initial-review" do
-        handle_review_label(payload)
-      end
-
-      if payload["action"] == "synchronize" and has_label?(payload) do
-        handle_review_label(payload)
-      end
+      if triggers_review?(payload), do: handle_review_label(payload)
 
       send_resp(conn, 202, "")
     else
       send_resp(conn, 401, "Unauthorized")
     end
   end
+
+  # The label being added, or a push to a PR that already carries it.
+  defp triggers_review?(%{"action" => "labeled"} = payload),
+    do: payload["label"]["name"] == @label
+
+  defp triggers_review?(%{"action" => "synchronize"} = payload), do: has_label?(payload)
+  defp triggers_review?(_payload), do: false
 
   defp handle_review_label(payload) do
     pr_number = payload["pull_request"]["number"]
@@ -50,6 +46,6 @@ defmodule MewtwoWeb.WebhookController do
 
   defp has_label?(payload) do
     labels = payload["pull_request"]["labels"] || []
-    Enum.any?(labels, fn label -> label["name"] == "initial-review" end)
+    Enum.any?(labels, &(&1["name"] == @label))
   end
 end

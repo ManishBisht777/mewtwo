@@ -12,8 +12,6 @@ defmodule Mewtwo.Agents.Spawner do
 
   require Logger
 
-  require Logger
-
   alias Mewtwo.Agents.AgentPrompts
   alias Mewtwo.Findings.AgentFinding
   alias Mewtwo.BedrockClient
@@ -220,8 +218,8 @@ defmodule Mewtwo.Agents.Spawner do
            AgentFinding.new(
              Map.get(raw, "file"),
              line,
-             parse_severity(Map.get(raw, "severity", "low")),
-             parse_confidence(Map.get(raw, "confidence", "low")),
+             parse_level(Map.get(raw, "severity", "low")),
+             parse_level(Map.get(raw, "confidence", "low")),
              Map.get(raw, "category"),
              Map.get(raw, "message"),
              Map.get(raw, "reasoning"),
@@ -249,27 +247,16 @@ defmodule Mewtwo.Agents.Spawner do
 
   defp coerce_line(_), do: {:error, "line must be a positive integer"}
 
-  defp parse_severity(s) when is_binary(s) do
-    case String.downcase(s) do
+  # Severity and confidence share the same high/medium/low vocabulary.
+  defp parse_level(value) when is_binary(value) do
+    case String.downcase(value) do
       "high" -> :high
       "medium" -> :medium
-      "low" -> :low
       _ -> :low
     end
   end
 
-  defp parse_severity(_), do: :low
-
-  defp parse_confidence(c) when is_binary(c) do
-    case String.downcase(c) do
-      "high" -> :high
-      "medium" -> :medium
-      "low" -> :low
-      _ -> :low
-    end
-  end
-
-  defp parse_confidence(_), do: :low
+  defp parse_level(_), do: :low
 
   defp log_agent_output(agent_name, findings, usage, response, elapsed_ms) do
     Logger.info(

@@ -72,8 +72,6 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
-  config :mewtwo, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
-
   config :mewtwo, MewtwoWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
@@ -134,22 +132,3 @@ config :mewtwo, :bedrock_pricing,
   input_usd_per_mtok: System.get_env("BEDROCK_INPUT_USD_PER_MTOK"),
   output_usd_per_mtok: System.get_env("BEDROCK_OUTPUT_USD_PER_MTOK")
 
-if config_env() == :prod do
-  # ## Configuring the mailer
-  #
-  # In production you need to configure the mailer to use a different adapter.
-  # Here is an example configuration for Mailgun:
-  #
-  #     config :mewtwo, Mewtwo.Mailer,
-  #       adapter: Swoosh.Adapters.Mailgun,
-  #       api_key: System.get_env("MAILGUN_API_KEY"),
-  #       domain: System.get_env("MAILGUN_DOMAIN")
-  #
-  # Most non-SMTP adapters require an API client. Swoosh supports Req, Hackney,
-  # and Finch out-of-the-box. This configuration is typically done at
-  # compile-time in your config/prod.exs:
-  #
-  #     config :swoosh, :api_client, Swoosh.ApiClient.Req
-  #
-  # See https://swoosh.hexdocs.pm/Swoosh.html#module-installation for details.
-end

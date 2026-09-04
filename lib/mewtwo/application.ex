@@ -8,9 +8,7 @@ defmodule Mewtwo.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      MewtwoWeb.Telemetry,
       Mewtwo.Repo,
-      {DNSCluster, query: Application.get_env(:mewtwo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Mewtwo.PubSub},
       # Caches GitHub App installation tokens, which are per-hour and cost an
       # API call to mint.
