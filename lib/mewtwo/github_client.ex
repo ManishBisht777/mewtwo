@@ -2,10 +2,17 @@ defmodule Mewtwo.GithubClient do
   @moduledoc """
   GitHub REST API client
 
-  Authenticates with `GITHUB_TOKEN` when one is set, and falls back to
-  anonymous access otherwise — which is enough to read public repositories
-  (60 requests/hour). A token is required for private repos, higher rate
-  limits, and any write (e.g. posting review comments).
+  Authentication, in order of preference:
+
+    1. a `:token` option — a GitHub App installation token or JWT from
+       `Mewtwo.GithubApp`, sent as `Bearer`. This is how the app acts as
+       itself, so review comments are authored by the app rather than by
+       whoever owns the personal token.
+    2. `GITHUB_TOKEN`, sent as `token` — a personal access token.
+    3. nothing at all, which is enough to read public repositories at 60
+       requests/hour.
+
+  A token is required for private repos, higher rate limits, and any write.
   """
 
   require Logger
@@ -26,7 +33,8 @@ defmodule Mewtwo.GithubClient do
 
   Options are passed through to `Req.get/2`. A `:headers` option is merged
   over the default headers (case-insensitively), so callers can override
-  `Accept` to request an alternate media type such as a raw diff.
+  `Accept` to request an alternate media type such as a raw diff, and a
+  `:token` option authenticates as a GitHub App instead of as `GITHUB_TOKEN`.
 
   Returns `{:ok, body}` or `{:error, reason}`. Unlike a bare `Req.get/2`,
   a non-2xx status is an error rather than a successful response carrying
@@ -59,8 +67,8 @@ defmodule Mewtwo.GithubClient do
   @doc """
   POST a JSON body to a single API path
 
-  Options are passed through to `Req.request/1`, so `:headers` merges over the
-  defaults exactly as in `get/2`.
+  Options are passed through to `Req.request/1`, so `:headers` and `:token`
+  behave exactly as in `get/2`.
 
   Returns `{:ok, body}` or `{:error, reason}`, with non-2xx mapped to the same
   reasons `get/2` uses — notably `{:unauthorized, msg}` for a missing or
@@ -81,7 +89,7 @@ defmodule Mewtwo.GithubClient do
   Worth checking before a write, so a missing token is reported as such
   instead of arriving as a confusing 401 from GitHub.
   """
-  def authenticated?, do: token() != nil
+  def authenticated?, do: env_token() != nil
 
   defp collect_pages(nil, _opts, acc, _remaining), do: {:ok, acc}
 
@@ -110,8 +118,9 @@ defmodule Mewtwo.GithubClient do
   defp do_get(url, opts), do: do_request(:get, url, opts)
 
   defp do_request(method, url, opts) do
-    {overrides, req_opts} = Keyword.pop(opts, :headers, [])
-    headers = merge_headers(@default_headers ++ auth_headers(), overrides)
+    {overrides, opts} = Keyword.pop(opts, :headers, [])
+    {token, req_opts} = Keyword.pop(opts, :token)
+    headers = merge_headers(@default_headers ++ auth_headers(token), overrides)
 
     case Req.request([method: method, url: url, headers: headers] ++ req_opts) do
       {:ok, response} -> check_status(response, url)
@@ -194,17 +203,24 @@ defmodule Mewtwo.GithubClient do
     end) ++ overrides
   end
 
-  defp auth_headers do
-    case token() do
+  # A GitHub App installation token or JWT is a bearer credential; a personal
+  # access token uses the older `token` scheme. GitHub accepts `Bearer` for
+  # both, but not `token` for a JWT.
+  defp auth_headers(nil) do
+    case env_token() do
       nil -> []
       token -> [{"Authorization", "token #{token}"}]
     end
   end
 
+  defp auth_headers(token) when is_binary(token) do
+    [{"Authorization", "Bearer #{token}"}]
+  end
+
   # An unset *or blank* GITHUB_TOKEN must yield no Authorization header at all.
   # Sending `token ` with an empty value gets a hard 401 from GitHub instead of
   # being treated as an anonymous request.
-  defp token do
+  defp env_token do
     case System.get_env("GITHUB_TOKEN") do
       nil ->
         nil

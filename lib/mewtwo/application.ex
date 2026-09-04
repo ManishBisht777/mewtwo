@@ -12,6 +12,9 @@ defmodule Mewtwo.Application do
       Mewtwo.Repo,
       {DNSCluster, query: Application.get_env(:mewtwo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Mewtwo.PubSub},
+      # Caches GitHub App installation tokens, which are per-hour and cost an
+      # API call to mint.
+      Mewtwo.GithubApp.TokenCache,
       # Start a worker by calling: Mewtwo.Worker.start_link(arg)
       # {Mewtwo.Worker, arg},
       # Start to serve requests, typically the last entry

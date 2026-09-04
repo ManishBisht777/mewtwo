@@ -16,6 +16,18 @@ defmodule Mewtwo.Github.Poster do
   entry listing every location. Five comments repeating one sentence read as a
   broken bot, not as five problems.
 
+  ## Who the review is from
+
+  Posted as the **GitHub App**, using an installation token from
+  `Mewtwo.GithubApp`. A review posted with a personal access token is
+  indistinguishable from that person's own review — their avatar, their name,
+  their rate limit — which is not what a bot review should look like.
+
+  With no app configured the poster falls back to `GITHUB_TOKEN` and says so in
+  the log. If the app *is* configured but its token cannot be minted, that is
+  an error rather than a quiet fallback: posting as a human instead would be a
+  surprise, not a recovery.
+
   ## The 422 fallback
 
   GitHub rejects an inline comment whose line is not part of the diff, and it
@@ -28,7 +40,7 @@ defmodule Mewtwo.Github.Poster do
   require Logger
 
   alias Mewtwo.Github.{CommentFormatter, FindingGrouper, SummaryFormatter}
-  alias Mewtwo.GithubClient
+  alias Mewtwo.{GithubApp, GithubClient}
 
   # How many findings the 422 fallback lists in the summary body.
   @max_fallback_items 50
@@ -36,10 +48,17 @@ defmodule Mewtwo.Github.Poster do
   @doc """
   Post a review to `repo`'s PR `pr_number`
 
-  `metadata` is passed straight to `Mewtwo.Github.SummaryFormatter.format/3`.
+  `review` is the judge's output:
+
+    * `:author_findings` — posted as inline comments
+    * `:reviewer_findings` — listed in the summary
+    * `:metadata` — passed to `Mewtwo.Github.SummaryFormatter.format/3`
 
   Options:
 
+    * `:installation_id` — the app installation to post as. Webhook payloads
+      carry it; without it the installation is looked up from the repo.
+    * `:token` — post with this credential instead of resolving one
     * `:request_opts` — passed through to `Mewtwo.GithubClient.post/3`, for
       tests that serve the request with a plug
 
@@ -53,29 +72,88 @@ defmodule Mewtwo.Github.Poster do
   so individual comment ids are not available without a further request.
 
   Errors are `GithubClient`'s: `{:unauthorized, msg}`, `{:not_found, msg}`,
-  `{:rate_limited, msg, seconds}`, `{:http_error, status, msg}`. Callers should
-  treat `:rate_limited` as retriable and the rest as terminal.
+  `{:rate_limited, msg, seconds}`, `{:http_error, status, msg}`, plus
+  `{:unauthenticated, msg}` and `Mewtwo.GithubApp`'s configuration errors.
+  Callers should treat `:rate_limited` as retriable and the rest as terminal.
   """
-  def post_review(
-        repo,
-        pr_number,
-        author_findings,
-        reviewer_findings,
-        metadata \\ %{},
-        opts \\ []
-      ) do
-    if GithubClient.authenticated?() do
-      do_post(repo, pr_number, author_findings, reviewer_findings, metadata, opts)
-    else
-      # Anonymous requests can read a public repo but never write to one, so
-      # this would otherwise surface as an unexplained 401.
-      Logger.error("[publish] no GITHUB_TOKEN set, so the review cannot be posted")
+  def post_review(repo, pr_number, review, opts \\ []) do
+    author = Map.get(review, :author_findings, [])
+    reviewer = Map.get(review, :reviewer_findings, [])
+    metadata = Map.get(review, :metadata, %{})
 
-      {:error, {:unauthenticated, "posting a review requires GITHUB_TOKEN"}}
+    with {:ok, request_opts} <- credential(repo, opts) do
+      do_post(repo, pr_number, author, reviewer, metadata, request_opts)
     end
   end
 
-  defp do_post(repo, pr_number, author_findings, reviewer_findings, metadata, opts) do
+  # Resolves who the review is from, and returns the request options that say
+  # so. An explicit token wins; otherwise the app; otherwise GITHUB_TOKEN.
+  defp credential(repo, opts) do
+    base = Keyword.get(opts, :request_opts, [])
+
+    case Keyword.fetch(opts, :token) do
+      {:ok, token} ->
+        {:ok, [token: token] ++ base}
+
+      :error ->
+        with {:ok, token} <- resolve_token(repo, opts) do
+          {:ok, token_opts(token) ++ base}
+        end
+    end
+  end
+
+  defp token_opts(nil), do: []
+  defp token_opts(token), do: [token: token]
+
+  defp resolve_token(repo, opts) do
+    # :request_opts has to reach GithubApp too — it mints the token over the
+    # same API, and a test's plug must serve those two hops as well.
+    app_opts = [
+      installation_id: Keyword.get(opts, :installation_id),
+      request_opts: Keyword.get(opts, :request_opts, [])
+    ]
+
+    case GithubApp.token_for(repo, app_opts) do
+      {:ok, token} ->
+        Logger.info("[publish] posting as the GitHub App")
+        {:ok, token}
+
+      :no_app ->
+        fall_back_to_personal_token()
+
+      # Configured but broken: a bad key, an app that is not installed, a
+      # revoked installation. Falling back would silently post as a person.
+      {:error, reason} ->
+        Logger.error(
+          "[publish] the GitHub App is configured but its token could not be minted: " <>
+            "#{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp fall_back_to_personal_token do
+    if GithubClient.authenticated?() do
+      Logger.warning(
+        "[publish] no GitHub App configured (GITHUB_APP_ID / GITHUB_PRIVATE_KEY_PATH), " <>
+          "so the review will be posted as the owner of GITHUB_TOKEN rather than as the app"
+      )
+
+      {:ok, nil}
+    else
+      # Anonymous requests can read a public repo but never write to one, so
+      # this would otherwise surface as an unexplained 401.
+      Logger.error("[publish] no GitHub App and no GITHUB_TOKEN, so the review cannot be posted")
+
+      {:error,
+       {:unauthenticated,
+        "posting a review requires a GitHub App (GITHUB_APP_ID and " <>
+          "GITHUB_PRIVATE_KEY_PATH) or GITHUB_TOKEN"}}
+    end
+  end
+
+  defp do_post(repo, pr_number, author_findings, reviewer_findings, metadata, request_opts) do
     summary = SummaryFormatter.format(author_findings, reviewer_findings, metadata)
 
     # The summary carries the recurring patterns; only the one-off findings
@@ -89,7 +167,7 @@ defmodule Mewtwo.Github.Poster do
         "#{length(patterns)} grouped pattern(s), #{byte_size(summary)}-byte summary"
     )
 
-    case submit(repo, pr_number, summary, comments, opts) do
+    case submit(repo, pr_number, summary, comments, request_opts) do
       {:ok, review} ->
         result = %{
           review_id: review_id(review),
@@ -111,7 +189,7 @@ defmodule Mewtwo.Github.Poster do
             "#{String.slice(message, 0..160)}); retrying with them in the summary"
         )
 
-        post_without_inline(repo, pr_number, summary, individual, opts)
+        post_without_inline(repo, pr_number, summary, individual, request_opts)
 
       {:error, reason} = error ->
         Logger.error("[publish] failed: #{inspect(reason)}")
@@ -119,10 +197,10 @@ defmodule Mewtwo.Github.Poster do
     end
   end
 
-  defp post_without_inline(repo, pr_number, summary, individual, opts) do
+  defp post_without_inline(repo, pr_number, summary, individual, request_opts) do
     body = summary <> "\n\n" <> rejected_section(individual)
 
-    case submit(repo, pr_number, body, [], opts) do
+    case submit(repo, pr_number, body, [], request_opts) do
       {:ok, review} ->
         result = %{review_id: review_id(review), inline_comments: 0, fallback: true}
 
@@ -163,15 +241,11 @@ defmodule Mewtwo.Github.Poster do
     |> String.trim()
   end
 
-  defp submit(repo, pr_number, body, comments, opts) do
+  defp submit(repo, pr_number, body, comments, request_opts) do
     payload = %{event: "COMMENT", body: body}
     payload = if comments == [], do: payload, else: Map.put(payload, :comments, comments)
 
-    GithubClient.post(
-      "/repos/#{repo}/pulls/#{pr_number}/reviews",
-      payload,
-      Keyword.get(opts, :request_opts, [])
-    )
+    GithubClient.post("/repos/#{repo}/pulls/#{pr_number}/reviews", payload, request_opts)
   end
 
   defp review_id(%{"id" => id}), do: id

@@ -11,12 +11,18 @@ defmodule Mewtwo.PRContext do
   @max_context_tokens 2_000_000
   @avg_tokens_per_file 500
 
-  def fetch(repo, pr_number) do
+  @doc """
+  Fetch PR metadata, changed files and commits
+
+  `opts` are passed to `Mewtwo.GithubClient` — notably `:token`, so a review
+  reads the PR as the same identity that will comment on it.
+  """
+  def fetch(repo, pr_number, opts \\ []) do
     Logger.info("Fetching PR context: #{repo}##{pr_number}")
 
-    with {:ok, pr} <- fetch_pr(repo, pr_number),
-         {:ok, files} <- fetch_changed_files(repo, pr_number),
-         {:ok, commits} <- fetch_commits(repo, pr_number) do
+    with {:ok, pr} <- fetch_pr(repo, pr_number, opts),
+         {:ok, files} <- fetch_changed_files(repo, pr_number, opts),
+         {:ok, commits} <- fetch_commits(repo, pr_number, opts) do
       {:ok,
        %{
          pr: pr,
@@ -31,9 +37,9 @@ defmodule Mewtwo.PRContext do
     end
   end
 
-  def fetch_with_diff(repo, pr_number) do
-    with {:ok, context} <- fetch(repo, pr_number),
-         {:ok, diff} <- fetch_diff(repo, pr_number) do
+  def fetch_with_diff(repo, pr_number, opts \\ []) do
+    with {:ok, context} <- fetch(repo, pr_number, opts),
+         {:ok, diff} <- fetch_diff(repo, pr_number, opts) do
       diff_tokens = estimate_diff_tokens(diff)
       file_tokens = length(context.files) * @avg_tokens_per_file
 
@@ -53,23 +59,24 @@ defmodule Mewtwo.PRContext do
     end
   end
 
-  defp fetch_pr(repo, pr_number) do
-    GithubClient.get("/repos/#{repo}/pulls/#{pr_number}")
+  defp fetch_pr(repo, pr_number, opts) do
+    GithubClient.get("/repos/#{repo}/pulls/#{pr_number}", opts)
   end
 
-  defp fetch_changed_files(repo, pr_number) do
-    GithubClient.get_paginated("/repos/#{repo}/pulls/#{pr_number}/files?per_page=100")
+  defp fetch_changed_files(repo, pr_number, opts) do
+    GithubClient.get_paginated("/repos/#{repo}/pulls/#{pr_number}/files?per_page=100", opts)
   end
 
-  defp fetch_commits(repo, pr_number) do
-    GithubClient.get_paginated("/repos/#{repo}/pulls/#{pr_number}/commits?per_page=100")
+  defp fetch_commits(repo, pr_number, opts) do
+    GithubClient.get_paginated("/repos/#{repo}/pulls/#{pr_number}/commits?per_page=100", opts)
   end
 
-  defp fetch_diff(repo, pr_number) do
+  defp fetch_diff(repo, pr_number, opts) do
     # The .diff media type returns a unified diff; .raw / the default JSON type
     # return the PR object instead, which cannot be compressed downstream.
-    case GithubClient.get("/repos/#{repo}/pulls/#{pr_number}",
-           headers: [{"Accept", "application/vnd.github.v3.diff"}]
+    case GithubClient.get(
+           "/repos/#{repo}/pulls/#{pr_number}",
+           [headers: [{"Accept", "application/vnd.github.v3.diff"}]] ++ opts
          ) do
       {:ok, diff_text} when is_binary(diff_text) ->
         {:ok, diff_text}
@@ -77,7 +84,9 @@ defmodule Mewtwo.PRContext do
       # Never pass a non-diff body through as {:ok, _}: it would satisfy the
       # `with` above and set context.diff to a map.
       {:ok, other} ->
-        {:error, {:unexpected_diff_body, "expected a unified diff, got #{inspect(other, printable_limit: 200)}"}}
+        {:error,
+         {:unexpected_diff_body,
+          "expected a unified diff, got #{inspect(other, printable_limit: 200)}"}}
 
       {:error, reason} ->
         {:error, reason}

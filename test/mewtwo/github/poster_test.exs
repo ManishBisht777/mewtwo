@@ -57,9 +57,13 @@ defmodule Mewtwo.Github.PosterTest do
   end
 
   defp post(findings, reviewer \\ [], responses) do
-    Poster.post_review("owner/name", 7, findings, reviewer, %{total_agents: 5},
-      request_opts: [plug: recording_plug(responses)]
-    )
+    review = %{
+      author_findings: findings,
+      reviewer_findings: reviewer,
+      metadata: %{total_agents: 5}
+    }
+
+    Poster.post_review("owner/name", 7, review, request_opts: [plug: recording_plug(responses)])
   end
 
   describe "acceptance: posting a review" do
@@ -235,8 +239,91 @@ defmodule Mewtwo.Github.PosterTest do
     end
   end
 
+  describe "who the review is from" do
+    test "posts as the GitHub App when one is configured" do
+      key = :public_key.generate_key({:rsa, 2048, 65_537})
+      pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
+
+      System.put_env("GITHUB_APP_ID", "123456")
+      System.put_env("GITHUB_PRIVATE_KEY", pem)
+
+      on_exit(fn ->
+        System.delete_env("GITHUB_APP_ID")
+        System.delete_env("GITHUB_PRIVATE_KEY")
+        Mewtwo.GithubApp.TokenCache.clear()
+      end)
+
+      test_process = self()
+
+      plug = fn conn ->
+        {:ok, _body, conn} = Plug.Conn.read_body(conn)
+        authorization = conn |> Plug.Conn.get_req_header("authorization") |> List.first()
+
+        send(test_process, {:auth, conn.request_path, authorization})
+
+        response =
+          case conn.request_path do
+            "/app/installations/77/access_tokens" ->
+              %{"token" => "ghs_app_token", "expires_at" => "2099-01-01T00:00:00Z"}
+
+            _ ->
+              %{"id" => 4}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(201, Jason.encode!(response))
+      end
+
+      review = %{author_findings: [finding([])], reviewer_findings: []}
+
+      assert {:ok, %{review_id: 4}} =
+               Poster.post_review("owner/name", 7, review,
+                 installation_id: 77,
+                 request_opts: [plug: plug]
+               )
+
+      # The review is posted with the app's installation token, not with the
+      # GITHUB_TOKEN this test also has set.
+      assert_received {:auth, "/app/installations/77/access_tokens", _jwt}
+
+      assert_received {:auth, "/repos/owner/name/pulls/7/reviews", authorization}
+      assert authorization == "Bearer ghs_app_token"
+    end
+
+    test "posts with an explicit token when given one" do
+      assert {:ok, _} =
+               Poster.post_review("owner/name", 7, %{author_findings: []},
+                 token: "ghs_explicit",
+                 request_opts: [plug: recording_plug([{201, %{"id" => 1}}])]
+               )
+
+      assert_received {:request, _, _, _}
+    end
+
+    test "refuses to fall back to a personal token when the app is broken" do
+      System.put_env("GITHUB_APP_ID", "123456")
+      System.put_env("GITHUB_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nbroken\n")
+
+      on_exit(fn ->
+        System.delete_env("GITHUB_APP_ID")
+        System.delete_env("GITHUB_PRIVATE_KEY")
+      end)
+
+      log =
+        capture_log(fn ->
+          # Posting as the GITHUB_TOKEN owner instead would be a surprise, not
+          # a recovery: the point of the app is that reviews come from the app.
+          assert {:error, {:bad_private_key, _}} = post([finding([])], [{201, %{"id" => 1}}])
+        end)
+
+      assert log =~ "could not be minted"
+      refute_received {:request, _, _, _}
+    end
+  end
+
   describe "errors a caller has to tell apart" do
-    test "reports a missing token without making a request" do
+    test "reports having no credential at all without making a request" do
       System.delete_env("GITHUB_TOKEN")
 
       log =
@@ -244,6 +331,7 @@ defmodule Mewtwo.Github.PosterTest do
           assert {:error, {:unauthenticated, message}} =
                    post([finding([])], [{201, %{"id" => 1}}])
 
+          assert message =~ "GITHUB_APP_ID"
           assert message =~ "GITHUB_TOKEN"
         end)
 
@@ -269,7 +357,7 @@ defmodule Mewtwo.Github.PosterTest do
 
       capture_log(fn ->
         assert {:error, {:rate_limited, _, 120}} =
-                 Poster.post_review("owner/name", 7, [finding([])], [], %{},
+                 Poster.post_review("owner/name", 7, %{author_findings: [finding([])]},
                    request_opts: [plug: plug]
                  )
       end)

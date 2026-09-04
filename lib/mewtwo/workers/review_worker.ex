@@ -14,6 +14,12 @@ defmodule Mewtwo.Workers.ReviewWorker do
       the filesystem and a webhook job has no checkout.
     * `"publish"` — optional boolean overriding `:review, :post_to_github`.
       Set it to `false` to run a review without commenting on the PR.
+    * `"installation_id"` — optional GitHub App installation, taken from the
+      webhook payload. Without it the installation is looked up from the repo.
+
+  The whole review — reads and the posted comments — acts as one identity,
+  resolved once at the start: the GitHub App when it is configured, otherwise
+  `GITHUB_TOKEN`.
   """
 
   use Oban.Worker, queue: :reviews, max_attempts: 3
@@ -26,11 +32,22 @@ defmodule Mewtwo.Workers.ReviewWorker do
   alias Mewtwo.Agents.Spawner
   alias Mewtwo.Findings.AgentFinding
   alias Mewtwo.Github.Poster
+  alias Mewtwo.GithubApp
 
   @default_agents ["bugs", "perf", "security", "architecture", "readability"]
 
   # Retrying will not help: the PR is gone, we cannot see it, or it is too big.
-  @permanent_errors [:not_found, :unauthorized, :diff_too_large, :unexpected_diff_body]
+  @permanent_errors [
+    :not_found,
+    :unauthorized,
+    :diff_too_large,
+    :unexpected_diff_body,
+    # App auth: a missing key, an unreadable key, or an app that is not
+    # installed on the repo. None of these change between attempts.
+    :missing_config,
+    :bad_private_key,
+    :not_installed
+  ]
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: args}) do
@@ -41,8 +58,8 @@ defmodule Mewtwo.Workers.ReviewWorker do
     review = create_review(args)
 
     case run_pipeline(args) do
-      {:ok, author, reviewer, metadata} ->
-        complete(review, args, author, reviewer, metadata, started)
+      {:ok, author, reviewer, metadata, auth} ->
+        complete(review, args, author, reviewer, metadata, auth, started)
 
       # A rate limit clears on GitHub's schedule, not ours. Oban's default
       # backoff would spend all three attempts inside the same window.
@@ -59,7 +76,8 @@ defmodule Mewtwo.Workers.ReviewWorker do
     pr_number = args["pr_number"]
     agents = Map.get(args, "agents") || @default_agents
 
-    with {:ok, context} <- PRContext.fetch_with_diff(repo, pr_number),
+    with {:ok, auth} <- authenticate(args),
+         {:ok, context} <- PRContext.fetch_with_diff(repo, pr_number, auth),
          {:ok, compressed, compression} <- compress(context),
          fetched_context <- fetch_dynamic_context(compressed, args),
          {:ok, findings, agent_meta} <-
@@ -79,7 +97,30 @@ defmodule Mewtwo.Workers.ReviewWorker do
           context: context_counts(fetched_context)
         })
 
-      {:ok, author, reviewer, metadata}
+      {:ok, author, reviewer, metadata, auth}
+    end
+  end
+
+  # One identity for the whole review. Resolved before the first request so a
+  # misconfigured app fails the job immediately, rather than after five model
+  # calls have been spent.
+  defp authenticate(args) do
+    case GithubApp.token_for(args["repo"], installation_id: args["installation_id"]) do
+      {:ok, token} ->
+        Logger.info("[review] stage :auth ok: acting as the GitHub App")
+        {:ok, [token: token]}
+
+      :no_app ->
+        Logger.warning(
+          "[review] stage :auth: no GitHub App configured, falling back to GITHUB_TOKEN — " <>
+            "review comments will be authored by that account, not by the app"
+        )
+
+        {:ok, []}
+
+      {:error, reason} ->
+        Logger.error("[review] stage :auth FAILED: #{inspect(reason)}")
+        {:error, reason}
     end
   end
 
@@ -242,10 +283,10 @@ defmodule Mewtwo.Workers.ReviewWorker do
     {:snooze, seconds + 5}
   end
 
-  defp complete(review, args, author, reviewer, metadata, started) do
+  defp complete(review, args, author, reviewer, metadata, auth, started) do
     # Published before the row is written so the outcome is recorded with the
     # review rather than needing a second update.
-    metadata = Map.put(metadata, :publish, publish(args, author, reviewer, metadata))
+    metadata = Map.put(metadata, :publish, publish(args, author, reviewer, metadata, auth))
 
     review
     |> Review.changeset(%{
@@ -267,7 +308,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
   # the pipeline that produced them cost five model calls; retrying to fix a
   # comment would re-run all of it, and a 403 from a missing `pull_requests:
   # write` permission will fail again anyway.
-  defp publish(args, author, reviewer, metadata) do
+  defp publish(args, author, reviewer, metadata, auth) do
     cond do
       not publish?(args) ->
         Logger.info("[review] stage :publish SKIPPED: disabled by config or job args")
@@ -278,12 +319,14 @@ defmodule Mewtwo.Workers.ReviewWorker do
         %{status: "skipped", reason: "no pr_number"}
 
       true ->
-        do_publish(args, author, reviewer, metadata)
+        do_publish(args, author, reviewer, metadata, auth)
     end
   end
 
-  defp do_publish(args, author, reviewer, metadata) do
-    case Poster.post_review(args["repo"], args["pr_number"], author, reviewer, metadata) do
+  defp do_publish(args, author, reviewer, metadata, auth) do
+    review = %{author_findings: author, reviewer_findings: reviewer, metadata: metadata}
+
+    case Poster.post_review(args["repo"], args["pr_number"], review, auth) do
       {:ok, result} ->
         Logger.info(
           "[review] stage :publish ok: review #{result.review_id}, " <>

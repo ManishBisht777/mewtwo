@@ -320,7 +320,7 @@
 - [x] Handle GitHub API errors (rate limit, auth, etc.)
 - [x] Return: `{:ok, result}` or `{:error, reason}`
 
-**Status:** ✅ Complete (15 poster + 3 client tests passing)
+**Status:** ✅ Complete (18 poster + 24 app-auth + 3 client tests passing)
 - One `POST /pulls/:n/reviews` carries the summary body and every inline
   comment: one notification for the author, and it cannot half-post
 - Only one-off findings get inline comments; recurring patterns live in the
@@ -330,6 +330,13 @@
   into the summary body, so no finding is lost
 - Returns `%{review_id, inline_comments, fallback}` — GitHub's review endpoint
   answers with the review, not per-comment ids
+- **Posted as the GitHub App**, not as `GITHUB_TOKEN`'s owner. `Mewtwo.GithubApp`
+  signs an RS256 JWT with the app key and mints an hour-long installation token
+  (cached in `GithubApp.TokenCache`); `ReviewWorker`'s `:auth` stage resolves it
+  once and threads it through both the reads and the post, so the whole review
+  is one actor. A configured-but-broken app is an error, not a quiet fallback
+  to posting as a person. Verified against the live app: `mewvi` (id 4802140),
+  `pull_requests: write`
 - Wired into `ReviewWorker`'s `:publish` stage, gated on
   `:review, :post_to_github` and the `"publish"` job arg. A publish failure
   logs and records itself on the review rather than failing the job, which

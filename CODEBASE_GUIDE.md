@@ -58,6 +58,10 @@ this" and "a reviewer might want to know this". The result is written to the
 ║  :record   insert/resume a Mewtwo.Review row       ✅                ║
 ║     │                                                                ║
 ║     ▼                                                                ║
+║  :auth     Mewtwo.GithubApp.token_for/2            ✅                ║
+║     │        one identity for the whole review — the app if           ║
+║     │        configured, else GITHUB_TOKEN                            ║
+║     ▼                                                                ║
 ║  :fetch    Mewtwo.PRContext.fetch_with_diff/2      ✅                ║
 ║     │        → Mewtwo.GithubClient (REST, retries, status mapping)   ║
 ║     │        → PR metadata, changed files, commits, unified diff     ║
@@ -97,7 +101,9 @@ lib/mewtwo/
 │
 ├── pr_context.ex                  fetch PR metadata + unified diff
 ├── github_client.ex               GitHub REST: auth, pagination, status mapping
-├── github_app.ex                  webhook HMAC verification (that is all it does)
+├── github_app.ex                ★ the app's identity: webhook HMAC, JWT,
+│   └── github_app/                  installation tokens
+│       └── token_cache.ex         hour-long installation tokens, cached
 │
 ├── compression.ex               ★ 4-stage pipeline entry point
 │   └── compression/
@@ -167,10 +173,13 @@ default JSON media type returns the PR object instead.
 
 `GithubClient` is a thin but opinionated wrapper:
 
-- **Anonymous by default.** No `GITHUB_TOKEN` means no `Authorization` header
-  at all, which is enough for public repos at 60 requests/hour. Sending an
-  empty `token ` value gets a hard 401 instead of being treated as anonymous,
-  so the header is omitted rather than blanked.
+- **Three ways to authenticate**, in order: a `:token` option (a GitHub App
+  installation token or JWT, sent as `Bearer`), `GITHUB_TOKEN` (sent as
+  `token`), or nothing at all — enough for public repos at 60 requests/hour.
+  The scheme matters: GitHub accepts `Bearer` for both kinds of credential but
+  rejects `token` for a JWT. Sending an empty `token ` value gets a hard 401
+  instead of being treated as anonymous, so the header is omitted rather than
+  blanked.
 - **Non-2xx is an error.** GitHub returns 401/403/404 with a normal-looking
   JSON body; without an explicit status check those flow downstream as success.
   Errors are mapped to `{:not_found, msg}`, `{:unauthorized, msg}`,
@@ -181,6 +190,46 @@ default JSON media type returns the PR object instead.
 - **Writes need a token.** `post/3` shares the same status mapping;
   `authenticated?/0` lets a caller report a missing token as such instead of
   passing GitHub's 401 downstream.
+
+### 4.2b Identity — `GithubApp`
+
+A review is posted **by the app**, not by whoever's personal token is in the
+environment. A review from a human account is indistinguishable from that
+human's own review — their avatar, their name, their rate limit.
+
+Acting as the app is two hops, both in `GithubApp`:
+
+```
+GITHUB_APP_ID + private key (RS256)
+        │  Joken, iss=app_id, exp ≤ 10 min
+        ▼
+   app JWT ──► POST /app/installations/:id/access_tokens
+                        │
+                        ▼
+            installation token (1 hour) ──► reads the PR, posts the review
+```
+
+- **The JWT cannot touch a repository.** It only reads app-level endpoints;
+  everything else needs an installation token minted with it.
+- **`exp` must be within 10 minutes** and `iat` is back-dated 60s, per
+  GitHub's guidance, or a slow clock gets a 401.
+- **The installation is resolved once.** Webhook payloads carry
+  `installation.id`, so `WebhookController` passes it into the job args and no
+  lookup is needed. Without it, `GET /repos/:repo/installation` finds it.
+- **Tokens are cached** in `GithubApp.TokenCache` (an `Agent`) until five
+  minutes before expiry, so a review's five-odd requests share one mint. A
+  missing cache process is not fatal — it just means minting again.
+- **`.env` writes values as `KEY = value`**, so every read is trimmed. A
+  leading space in the app id signs a JWT with `iss: " 123"` and GitHub
+  answers with an unhelpful 401.
+
+`ReviewWorker` resolves the identity in its `:auth` stage before spending any
+model calls, and threads it through both `PRContext` and `Poster` — so reads
+and writes are the same actor. With no app configured, everything falls back
+to `GITHUB_TOKEN` with a warning that says who the comments will come from.
+
+Current app: `mewvi` (id 4802140), with `pull_requests: write` — the one
+permission the poster needs.
 
 ### 4.3 Compress — `Compression`
 
@@ -303,6 +352,9 @@ One request, not N. A single **pull request review** carries the summary as its
 body and every author finding as an inline comment, so the author gets one
 notification and the post cannot land half-finished.
 
+- **Posted as the app**, with the installation token from the `:auth` stage.
+  If the app is configured but its token cannot be minted, publishing errors
+  rather than quietly posting as a person — see §4.2b.
 - **`event: "COMMENT"`, never `REQUEST_CHANGES`.** A bot that blocks merges on
   unverified model output has its permissions revoked within a week.
 - **Inline comments merge per `{file, line}`.** The judge groups on
@@ -395,7 +447,7 @@ than inserting a duplicate.
 
 Every stage logs entry and exit with timings, sizes and token counts, prefixed
 by stage: `[review]`, `[pr]`, `[compression]`, `[context]`, `[agents]`,
-`[agent <name>]`, `[bedrock]`, `[judge]`, `[publish]`. Each agent logs its findings one per
+`[agent <name>]`, `[bedrock]`, `[judge]`, `[github_app]`, `[publish]`. Each agent logs its findings one per
 line; the judge logs its decisions and the final author/reviewer lists with
 `confirmed by` provenance. `--log-level debug` adds per-compression-stage
 deltas and per-finding reasoning.
@@ -407,6 +459,7 @@ deltas and per-finding reasoning.
 | `:review, :diff_token_budget` | `config/config.exs` | Ceiling on the compressed diff (default 100k) |
 | `:review, :max_prompt_tokens` | `config/config.exs` | Per-agent pre-flight ceiling (default 180k) |
 | `:review, :post_to_github` | `config/config.exs` | Whether to comment on the PR (default true, off in test) |
+| `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH` | `.env` | The app the review is posted as. `GITHUB_PRIVATE_KEY` takes the PEM inline instead |
 | `:bedrock` | `config/runtime.exs` | Token, model ID, region |
 | `:bedrock_pricing` | `config/runtime.exs` | Per-MTok rates for cost reporting |
 | `Oban, queues` | `config/config.exs` | Must include `reviews:` or jobs never run |
@@ -424,7 +477,8 @@ Verified against the code and its tests, not against the task list.
 | Area | Modules | Notes |
 |---|---|---|
 | Webhook ingress | `webhook_controller`, `github_app` | Label trigger works end to end |
-| GitHub API | `github_client`, `pr_context` | Anonymous fallback, status mapping, page cap |
+| App auth | `github_app`, `github_app/token_cache` | JWT + installation tokens, cached; reviews are authored by the app |
+| GitHub API | `github_client`, `pr_context` | App/PAT/anonymous auth, status mapping, page cap |
 | Compression | `compression` + 4 stages | Including budget truncation |
 | Dynamic context | `dynamic_context` + 4 finders | Needs a local checkout |
 | Agents | `spawner`, `agent_prompts`, 6 prompt files | 5 agents, parallel |
@@ -471,7 +525,7 @@ Verified against the code and its tests, not against the task list.
 ```bash
 mix deps.get
 mix ecto.setup
-mix test                 # ~390 tests, no network calls except a few GitHub 401s
+mix test                 # ~417 tests, no network calls except a few GitHub 401s
 iex -S mix phx.server
 ```
 
@@ -486,9 +540,13 @@ Trigger a review without a webhook or a tunnel:
 |> Oban.insert!()
 ```
 
-Required in `.env`: `BEDROCK_TOKEN`, `BEDROCK_MODEL_ID`. Required to post the
-review back: `GITHUB_TOKEN` with `pull_requests: write` — also what gets you
-private repos and 5000 req/hour instead of 60.
+Required in `.env`: `BEDROCK_TOKEN`, `BEDROCK_MODEL_ID`. To post the review as
+the app: `GITHUB_APP_ID` and `GITHUB_PRIVATE_KEY_PATH`, with the app installed
+on the repository. `GITHUB_TOKEN` is the fallback when no app is configured —
+it works, but the comments come from that account.
+
+`mix test` deletes the app variables in `test_helper.exs`, so no test can mint
+a real installation token; the app-auth tests generate their own key.
 
 ---
 
