@@ -16,6 +16,7 @@ defmodule Mewtwo.Dashboard do
   import Ecto.Query
 
   alias Mewtwo.{Repo, Review}
+  alias Mewtwo.Findings.Finding
 
   @window_days 7
   @recent_limit 25
@@ -161,6 +162,165 @@ defmodule Mewtwo.Dashboard do
         _ -> []
       end
     end)
+  end
+
+  @doc """
+  M1 — compression over the window
+
+  Only runs whose metadata carries a compression block are counted. A failed
+  run never reached the stage, and averaging it in as zero would report a
+  compression regression that never happened.
+
+  `:runs` is 0 when nothing in the window compressed, in which case every
+  other value is nil.
+  """
+  def compression(opts \\ []) do
+    from(r in Review,
+      where: r.triggered_at >= ^since(opts),
+      where: not is_nil(fragment("? #> '{metadata,compression}'", r.author_findings)),
+      select: %{
+        runs: count(r.id),
+        avg_saved:
+          avg(
+            fragment(
+              "(1 - (? #>> '{metadata,compression,ratio}')::float) * 100",
+              r.author_findings
+            )
+          ),
+        original:
+          sum(
+            fragment("(? #>> '{metadata,compression,original_tokens}')::int", r.author_findings)
+          ),
+        compressed:
+          sum(
+            fragment("(? #>> '{metadata,compression,compressed_tokens}')::int", r.author_findings)
+          ),
+        dropped:
+          sum(
+            fragment(
+              "(? #>> '{metadata,compression,truncated_sections}')::int",
+              r.author_findings
+            )
+          )
+      }
+    )
+    |> Repo.one()
+  end
+
+  @doc """
+  M3 — tool agreement over the window
+
+  `:rate` is nil until Gitleaks (G1-G3) actually runs. With no tool findings
+  the rate is structurally 0%, and 0% reads as a bad score rather than as a
+  missing measurement.
+  """
+  def agreement(opts \\ []) do
+    row =
+      from(r in Review,
+        where: r.triggered_at >= ^since(opts),
+        select: %{
+          rate:
+            avg(fragment("(? #>> '{metadata,tool_agreement_rate}')::float", r.author_findings)),
+          tool_findings:
+            sum(fragment("(? #>> '{metadata,gitleaks_findings_count}')::int", r.author_findings))
+        }
+      )
+      |> Repo.one()
+
+    tool_findings = row.tool_findings || 0
+
+    %{rate: if(tool_findings > 0, do: row.rate), tool_findings: tool_findings}
+  end
+
+  @doc """
+  M3 — how many findings landed in each confidence tier, over the window
+
+  Reads the `findings` rows rather than the JSON blob: this is the aggregate
+  the tiers exist for.
+  """
+  def confidence_counts(opts \\ []) do
+    from(f in Finding,
+      where: f.inserted_at >= ^since(opts),
+      group_by: f.confidence,
+      select: {f.confidence, count(f.id)}
+    )
+    |> Repo.all()
+    |> Map.new()
+  end
+
+  @doc """
+  M2 — secrets Gitleaks reported over the window, by category
+
+  Empty until G1-G3 land, and the dashboard hides the section when it is:
+  "0 secrets" from a pipeline that never looked for any is a claim, not a
+  measurement.
+  """
+  def secrets_by_type(opts \\ []) do
+    from(f in Finding,
+      where: f.inserted_at >= ^since(opts) and f.source in ["gitleaks", "both"],
+      group_by: f.category,
+      order_by: [desc: count(f.id)],
+      select: %{
+        category: f.category,
+        count: count(f.id),
+        agreed: filter(count(f.id), f.source == "both")
+      }
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  M4 — per-agent findings, latency and failures over the window
+
+  Folded in Elixir from the `per_agent` metadata the Spawner already computes,
+  since the agent names are jsonb keys rather than rows. A few dozen runs of
+  five small maps each.
+  """
+  def agent_stats(opts \\ []) do
+    from(r in Review,
+      where: r.triggered_at >= ^since(opts),
+      select: fragment("? #> '{metadata,per_agent}'", r.author_findings)
+    )
+    |> Repo.all()
+    |> Enum.reject(&(!is_map(&1)))
+    |> Enum.flat_map(&Map.to_list/1)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.map(fn {agent, rows} ->
+      %{
+        agent: agent,
+        runs: length(rows),
+        findings: sum_of(rows, "findings"),
+        errors: Enum.count(rows, & &1["error"]),
+        avg_ms: div(sum_of(rows, "ms"), length(rows)),
+        input: sum_of(rows, ["usage", "input_tokens"]),
+        output: sum_of(rows, ["usage", "output_tokens"])
+      }
+    end)
+    |> Enum.sort_by(& &1.agent)
+  end
+
+  defp sum_of(rows, path) do
+    path = List.wrap(path)
+
+    Enum.reduce(rows, 0, fn row, total -> total + (get_in(row, path) || 0) end)
+  end
+
+  @doc """
+  M4 — review latency over the window, in seconds
+
+  Averages finished runs only: an in-flight run has no duration yet, and a
+  snoozed one spent most of its wall-clock waiting on a rate limit.
+  """
+  def latency(opts \\ []) do
+    from(r in Review,
+      where: r.triggered_at >= ^since(opts) and not is_nil(r.completed_at),
+      select: %{
+        runs: count(r.id),
+        avg: avg(fragment("extract(epoch from (? - ?))::float", r.completed_at, r.triggered_at)),
+        max: max(fragment("extract(epoch from (? - ?))::float", r.completed_at, r.triggered_at))
+      }
+    )
+    |> Repo.one()
   end
 
   @doc """

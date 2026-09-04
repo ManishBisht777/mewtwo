@@ -31,7 +31,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
   alias Mewtwo.{Compression, Cost, DynamicContext, Judge, PRContext, Repo, Review}
   alias Phoenix.PubSub
   alias Mewtwo.Agents.Spawner
-  alias Mewtwo.Findings.AgentFinding
+  alias Mewtwo.Findings.{AgentFinding, Finding}
   alias Mewtwo.Github.Poster
   alias Mewtwo.GithubApp
 
@@ -346,10 +346,22 @@ defmodule Mewtwo.Workers.ReviewWorker do
     })
     |> Repo.update!()
 
+    # Rows for the metrics queries; the JSON above stays the archive of what
+    # was posted. Never fails the run: the review is already recorded and the
+    # dashboard reads its counts from the JSON.
+    record_findings(review, author, reviewer)
+
     log_totals(review, author, reviewer, metadata, usage, started)
     announce(review.id, "done")
 
     :ok
+  end
+
+  defp record_findings(review, author, reviewer) do
+    Finding.record(review.id, author, reviewer)
+  rescue
+    error ->
+      Logger.error("[review] failed to record findings: #{Exception.message(error)}")
   end
 
   # nil, not 0.0, when rates are unset: a zero would read as a free review.

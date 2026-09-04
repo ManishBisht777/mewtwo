@@ -342,84 +342,145 @@
   logs and records itself on the review rather than failing the job, which
   would re-run five model calls
 
-### DB1: Review State Storage
+### DB1: Review State Storage ✅ COMPLETE
 **Depends on:** J4
-**Files:** `lib/mewtwo/reviews/review.ex` (update schema)
-- [ ] Store: review_id, pr_number, state (pending/complete/stale), findings_count
-- [ ] Add: author_findings (JSON), reviewer_findings (JSON)
-- [ ] Add: metadata (compression_ratio, token_usage, tool_agreement_rate)
+**Files:** `lib/mewtwo/review.ex`, `priv/repo/migrations/20260902085652_create_reviews.exs`,
+`priv/repo/migrations/20260904130000_add_dashboard_fields.exs`
+- [x] Store: review_id, pr_id, repo, state, stage, triggered_at/completed_at
+- [x] Add: author_findings (JSON), reviewer_findings (JSON)
+- [x] Add: metadata (compression, usage, per_agent, tool_agreement_rate)
 
-**Acceptance:**
-- Schema stores all required fields
-- Can retrieve review by PR number
+**Status:** ✅ Complete (landed with the dashboard work)
+- `status` is `pending | waiting | complete | failed`. **`stale` was skipped**:
+  nothing consumes it, and marking superseded reviews stale would drop them
+  out of `Dashboard.recent/1`, which is a history regression, not a feature.
+  Add it with the query change when a consumer exists
+- No `findings_count` column — `author_findings["count"]` already carries it,
+  and DB2's rows give a real `count(*)` per severity/confidence
+- Metadata still rides along inside `author_findings["metadata"]` rather than
+  its own column. The metrics queries read it with jsonb paths
+  (`? #>> '{metadata,compression,ratio}'`), which works and needs no data
+  migration of existing rows
 
-### DB2: Finding Storage
+### DB2: Finding Storage ✅ COMPLETE
 **Depends on:** DB1
-**Files:** `lib/mewtwo/findings/finding.ex` (schema)
-- [ ] Store individual findings: file, line, severity, confidence, message
-- [ ] Link to review_id
-- [ ] Add: agent_name, source (agent|gitleaks|both)
+**Files:** `lib/mewtwo/findings/finding.ex`,
+`priv/repo/migrations/20260904140000_create_findings.exs`
+- [x] Store individual findings: file, line, severity, confidence, message
+- [x] Link to review_id (FK, `on_delete: :delete_all`)
+- [x] Add: agent_name, source (agent|gitleaks|both), category, reasoning, audience
 
-**Acceptance:**
-- Findings schema compiles and migrates
-- Can query findings by review_id
+**Status:** ✅ Complete (7 tests passing)
+- `Finding.record/3` writes both audiences in one `insert_all` at the end of a
+  run, inside a transaction with a `delete_all` so a re-run replaces rather
+  than doubles. Recording never fails the review: the findings are already
+  archived on the row, so the worker logs and moves on
+- `source_of/1` derives `agent | gitleaks | both` from the judge's `sources`.
+  `both` is the tool agreement that earns `:high` confidence
+- The JSON on `reviews` stays the archive of exactly what was posted; these
+  rows are the queryable index — M2/M3 are a `GROUP BY` here instead of a
+  `jsonb_array_elements` join
+- `Finding.for_review/1` backs the dashboard's expand, loaded on click rather
+  than with the list
 
-### DB3: Token Usage Storage
+### DB3: Token Usage Storage ✅ COMPLETE
 **Depends on:** J4, DB1
-**Files:** Update DB schema
-- [ ] Store: total_tokens, per_agent_tokens, compression_tokens, gitleaks_tokens
-- [ ] Link to review_id
-- [ ] Add: timestamp
+**Files:** `lib/mewtwo/review.ex`, `priv/repo/migrations/20260904130000_add_dashboard_fields.exs`
+- [x] Store: total_tokens (input/output/calls), per_agent_tokens, cost_usd
+- [x] Link to review_id (columns on the row itself)
+- [x] Add: timestamp (`triggered_at`, indexed)
 
-**Acceptance:**
-- Token usage correctly recorded per review
-- Can query total usage over time
+**Status:** ✅ Complete (landed with the dashboard work)
+- `input_tokens`, `output_tokens`, `calls`, `cost_usd` are real columns, so
+  failed runs still appear in cost totals. **Cost is frozen at run time** —
+  rates change, and recomputing on read would rewrite history. NULL means
+  `BEDROCK_*_USD_PER_MTOK` were unset, and the UI renders `—`, never `$0.00`
+- Per-agent tokens live in `metadata.per_agent` (jsonb keyed by agent name);
+  `Dashboard.agent_stats/1` folds them over the window
+- No compression/gitleaks token columns: compression's own token counts are in
+  `metadata.compression`, and gitleaks spends no tokens (it is not a model)
 
 ---
 
 ## Phase 4: Monitoring & Analytics
 
-### M1: Compression Metrics
+**All four are queries in `Mewtwo.Dashboard`, not three new metrics modules.**
+Every number they need is already persisted (DB1-DB3), so a metric is a
+`SELECT`, and the aggregate logic stays in the one module that is already
+tested as plain functions (DASHBOARDCONTEXT.md decision 11). Three modules
+whose whole job is to re-read the same two tables would be indirection with
+no second caller.
+
+### M1: Compression Metrics ✅ COMPLETE
 **Depends on:** C4, DB3
-**Files:** `lib/mewtwo/metrics/compression_metrics.ex`
-- [ ] Track: original_size, compressed_size, ratio
-- [ ] Emit: "Compression achieved 65%"
-- [ ] Store in DB for historical analysis
+**Files:** `lib/mewtwo/dashboard.ex` (`compression/1`, `compression_trend/1`)
+- [x] Track: original_size, compressed_size, ratio
+- [x] Emit: "compression 76% saved over 12 run(s) · 412k → 98k tokens"
+- [x] Store in DB for historical analysis (`metadata.compression`, per run)
 
-**Acceptance:**
-- Correctly calculates compression ratio
-- Stores metrics for trending
+**Status:** ✅ Complete (2 tests passing)
+- `compression/1` averages percent saved over the window and totals the tokens
+  removed and the files dropped; `compression_trend/1` feeds the sparkline
+- Runs with no compression block are excluded, not averaged in as zero: a
+  failed run never reached the stage, and counting it would report a
+  regression that never happened. `runs: 0` means every other value is nil
 
-### M2: Gitleaks Metrics
+### M2: Gitleaks Metrics ⚠️ BLOCKED ON G1-G3
 **Depends on:** G3, DB3
-**Files:** `lib/mewtwo/metrics/gitleaks_metrics.ex`
-- [ ] Track: secrets_found, secret_types, false_positive_rate (feedback-based)
-- [ ] Emit alerts if > N secrets detected
+**Files:** `lib/mewtwo/dashboard.ex` (`secrets_by_type/1`)
+- [x] Track: secrets_found, secret_types (by category, with agreement count)
+- [ ] ~~false_positive_rate (feedback-based)~~ **deferred**
+- [ ] ~~Emit alerts if > N secrets detected~~ **deferred**
 
-**Acceptance:**
-- Correctly counts secrets by type
-- Can track false positive feedback
+**Status:** ⚠️ The query is in and tested; it returns `[]` until Gitleaks runs
+- `secrets_by_type/1` groups findings with `source in ("gitleaks", "both")` by
+  category and reports how many an agent also flagged. `ReviewWorker`'s
+  `gitleaks_findings/0` still returns `[]` (Phase 1c is not built), so the
+  dashboard hides the section entirely rather than claiming "0 secrets" from a
+  pipeline that never looked
+- False-positive rate needs a feedback channel that does not exist — there is
+  no UI or webhook that marks a finding wrong. Add it with that channel
+- The alert threshold would be dead code today: the count it fires on is
+  structurally 0. Add it in the same change that lands G3
 
-### M3: Tool Agreement Metrics
+### M3: Tool Agreement Metrics ✅ COMPLETE (rate blocked on G1-G3)
 **Depends on:** J2, DB3
-**Files:** `lib/mewtwo/metrics/agreement_metrics.ex`
-- [ ] Track: tool_agreement_rate, high_confidence_findings, medium_confidence_findings
-- [ ] Emit: "Tool agreement: 35% of findings verified by both"
+**Files:** `lib/mewtwo/dashboard.ex` (`agreement/1`, `confidence_counts/1`)
+- [x] Track: tool_agreement_rate, confidence distribution
+- [x] Emit: "tool agreement 35% of findings verified by both"
 
-**Acceptance:**
-- Correctly calculates agreement rate
-- Tracks confidence distribution
+**Status:** ✅ Complete (3 tests passing)
+- `confidence_counts/1` is real today: it counts DB2's rows per tier
+- `agreement/1` returns `rate: nil` while no run has had a tool finding. The
+  rate is *structurally* 0% until G1-G3 land, and 0% reads as a bad score
+  rather than as a missing measurement, so the UI omits the line (this is
+  DASHBOARDCONTEXT.md decision 9, now self-resolving instead of hardcoded off)
 
-### M4: Dashboard/Reporting
+### M4: Dashboard/Reporting ✅ COMPLETE
 **Depends on:** M1, M2, M3, DB3
-**Files:** `lib/mewtwo_web/live/metrics_live.ex`
-- [ ] Show: compression ratio trend, gitleaks findings per day, tool agreement rate
-- [ ] Show: review latency, agent performance
-- [ ] Real-time updates (LiveView)
+**Files:** `lib/mewtwo_web/live/dashboard_live.ex`, `lib/mewtwo/dashboard.ex`
+- [x] Show: compression ratio trend, tool agreement rate, secrets by type
+- [x] Show: review latency, agent performance
+- [x] Real-time updates (LiveView)
 
-**Acceptance:**
-- Dashboard displays all metrics
-- Refreshes in real-time
+**Status:** ✅ Complete (v1 shipped in `df85311`, metrics added on top)
+- One page, not a second `metrics_live.ex`: the run list and the metrics answer
+  the same question and share the same PubSub subscription and reload tick
+- New sections: **pipeline** (compression saved, latency avg/worst, confidence
+  distribution, tool agreement when it exists), **secrets** (hidden when
+  empty), **agents** (runs, avg latency, tokens, findings, failures per agent
+  over the window)
+- Expanding a run now also lists its stored findings, loaded on click rather
+  than carried in assigns for all 25 rows
+- `Dashboard.agent_stats/1` folds `metadata.per_agent` in Elixir: agent names
+  are jsonb keys, not rows, and it is a few dozen runs of five small maps
+- `latency/1` averages finished runs only — an in-flight run has no duration,
+  and a snoozed one spent its wall-clock waiting on a rate limit
+- Test: aggregates as plain functions in `test/mewtwo/dashboard_test.exs`, plus
+  one render smoke test (`test/mewtwo_web/live/dashboard_live_test.exs`) that
+  GETs the LiveView's static render. `Phoenix.LiveViewTest` would cover the
+  expand click too, but it needs a `lazy_html` version incompatible with this
+  project's LiveView, and one dependency for one click is not worth it
 
 ---
 
@@ -469,8 +530,8 @@
 | 1b | D1-D5 | None | Dynamic context fetcher (15K tokens) |
 | 1c | G1-G3 | None | Gitleaks wrapper (supervised) |
 | 2 | A1-A3, J1-J4 | 1a, 1b, 1c | Agents + Judge (tool agreement scoring) |
-| 3 | P1-P3, DB1-DB3 | Phase 2 | GitHub posting + DB storage |
-| 4 | M1-M4 | Phase 3 | Monitoring dashboard |
+| 3 | P1-P3, DB1-DB3 | Phase 2 | GitHub posting + DB storage ✅ |
+| 4 | M1-M4 | Phase 3 | Monitoring dashboard ✅ (M2 waits on G1-G3) |
 | Integration | I1-I3 | All | E2E pipeline + testing |
 
 ---

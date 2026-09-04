@@ -12,6 +12,7 @@ defmodule MewtwoWeb.DashboardLive do
   use MewtwoWeb, :live_view
 
   alias Mewtwo.{Cost, Dashboard}
+  alias Mewtwo.Findings.Finding
   alias Phoenix.PubSub
 
   # Order the checklist renders in. A run's real agent list is only known once
@@ -28,7 +29,7 @@ defmodule MewtwoWeb.DashboardLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Dashboard", expanded: MapSet.new(), agents: %{})
+     |> assign(page_title: "Dashboard", expanded: MapSet.new(), agents: %{}, findings: %{})
      |> load()}
   end
 
@@ -59,12 +60,17 @@ defmodule MewtwoWeb.DashboardLive do
   def handle_event("toggle", %{"id" => id}, socket) do
     expanded = socket.assigns.expanded
 
-    expanded =
-      if MapSet.member?(expanded, id),
-        do: MapSet.delete(expanded, id),
-        else: MapSet.put(expanded, id)
-
-    {:noreply, assign(socket, expanded: expanded)}
+    if MapSet.member?(expanded, id) do
+      {:noreply, assign(socket, expanded: MapSet.delete(expanded, id))}
+    else
+      # Loaded on expand, not with the list: 25 runs x N findings is a lot of
+      # rows to carry in assigns for the one row someone opened.
+      {:noreply,
+       assign(socket,
+         expanded: MapSet.put(expanded, id),
+         findings: Map.put_new_lazy(socket.assigns.findings, id, fn -> Finding.for_review(id) end)
+       )}
+    end
   end
 
   defp load(socket) do
@@ -81,7 +87,13 @@ defmodule MewtwoWeb.DashboardLive do
       recent: Dashboard.recent(),
       cost_spark: Dashboard.sparkline(Enum.map(daily, &(&1.cost || 0.0))),
       runs_spark: Dashboard.sparkline(Enum.map(daily, & &1.runs)),
-      compression_spark: Dashboard.sparkline(Dashboard.compression_trend())
+      compression_spark: Dashboard.sparkline(Dashboard.compression_trend()),
+      compression: Dashboard.compression(),
+      latency: Dashboard.latency(),
+      confidence: Dashboard.confidence_counts(),
+      agreement: Dashboard.agreement(),
+      secrets: Dashboard.secrets_by_type(),
+      agent_stats: Dashboard.agent_stats()
     )
   end
 
@@ -150,6 +162,64 @@ defmodule MewtwoWeb.DashboardLive do
         </ul>
       </section>
 
+      <section>
+        <.heading>pipeline</.heading>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8">
+          <p :if={@compression.runs > 0} class="opacity-70">
+            compression {pct(@compression.avg_saved)} saved over {@compression.runs} run(s) · {tokens(
+              @compression.original
+            )} → {tokens(@compression.compressed)} tokens · {@compression.dropped || 0} file(s) dropped
+          </p>
+
+          <p :if={@latency.runs > 0} class="opacity-70">
+            latency {secs_of(@latency.avg)} avg, {secs_of(@latency.max)} worst
+            over {@latency.runs} finished run(s)
+          </p>
+
+          <p :if={@confidence != %{}} class="opacity-70">
+            confidence
+            <span :for={tier <- ~w(high medium low)} :if={@confidence[tier]}>
+              {tier} {@confidence[tier]}
+            </span>
+          </p>
+
+          <%!-- Omitted while gitleaks has produced nothing: the rate is
+                structurally 0% until G1-G3 land, and a fake zero reads as a
+                bad score rather than as a missing measurement. --%>
+          <p :if={@agreement.rate} class="opacity-70">
+            tool agreement {pct(@agreement.rate * 100)} of findings verified by both · {@agreement.tool_findings} tool finding(s)
+          </p>
+        </div>
+      </section>
+
+      <section :if={@secrets != []}>
+        <.heading>secrets</.heading>
+
+        <ul class="divide-y divide-base-300">
+          <li :for={row <- @secrets} class="py-1 flex items-center gap-x-4">
+            <span class="w-32 truncate">{row.category}</span>
+            <span class="w-16 tabular-nums">{row.count}</span>
+            <span class="opacity-70">{row.agreed} also flagged by an agent</span>
+          </li>
+        </ul>
+      </section>
+
+      <section :if={@agent_stats != []}>
+        <.heading>agents</.heading>
+
+        <ul class="divide-y divide-base-300">
+          <li :for={row <- @agent_stats} class="py-1 flex flex-wrap items-center gap-x-4">
+            <span class="w-28">{row.agent}</span>
+            <span class="w-16 tabular-nums opacity-70">{row.runs} runs</span>
+            <span class="w-14 tabular-nums opacity-70">{ms(row.avg_ms)}</span>
+            <span class="w-20 tabular-nums opacity-70">{tokens(row.input)}/{tokens(row.output)}</span>
+            <span class="w-24 tabular-nums">{row.findings} findings</span>
+            <span :if={row.errors > 0} class="text-error">{row.errors} failed</span>
+          </li>
+        </ul>
+      </section>
+
       <section :if={@compression_spark != ""}>
         <.heading>compression saved (% per run)</.heading>
         <svg viewBox="0 0 240 40" class="w-full h-10 text-primary" preserveAspectRatio="none">
@@ -177,7 +247,11 @@ defmodule MewtwoWeb.DashboardLive do
               <span class="opacity-70">{finding_count(review)} findings</span>
             </button>
 
-            <.detail :if={expanded?(@expanded, review)} review={review} />
+            <.detail
+              :if={expanded?(@expanded, review)}
+              review={review}
+              findings={Map.get(@findings, review.id, [])}
+            />
           </li>
         </ul>
       </section>
@@ -232,6 +306,7 @@ defmodule MewtwoWeb.DashboardLive do
   end
 
   attr :review, :map, required: true
+  attr :findings, :list, default: []
 
   defp detail(assigns) do
     assigns = assign(assigns, :meta, metadata(assigns.review))
@@ -277,6 +352,13 @@ defmodule MewtwoWeb.DashboardLive do
       <p :if={@meta["publish"]} class="opacity-70">
         publish {@meta["publish"]["status"]}{publish_detail(@meta["publish"])}
       </p>
+
+      <div :for={finding <- @findings} class="flex flex-wrap gap-x-3">
+        <span class={["w-16", severity_class(finding.severity)]}>{finding.severity}</span>
+        <span class="w-16 opacity-60">{finding.confidence}</span>
+        <span class="w-16 opacity-60">{finding.source}</span>
+        <span class="truncate">{finding.file}:{finding.line} — {finding.message}</span>
+      </div>
     </div>
     """
   end
@@ -325,6 +407,10 @@ defmodule MewtwoWeb.DashboardLive do
   defp dot_class(:running), do: "text-primary animate-pulse"
   defp dot_class(_status), do: "opacity-30"
 
+  defp severity_class("high"), do: "text-error"
+  defp severity_class("medium"), do: "text-warning"
+  defp severity_class(_severity), do: "opacity-60"
+
   defp status_class("complete"), do: "badge-success"
   defp status_class("failed"), do: "badge-error"
   defp status_class(_status), do: "badge-ghost"
@@ -341,6 +427,12 @@ defmodule MewtwoWeb.DashboardLive do
 
   defp ms(nil), do: "—"
   defp ms(n), do: "#{Float.round(n / 1000, 1)}s"
+
+  defp pct(nil), do: "—"
+  defp pct(value), do: "#{round(value)}%"
+
+  defp secs_of(nil), do: "—"
+  defp secs_of(seconds), do: humanize(round(seconds))
 
   defp saved(nil), do: "—"
   defp saved(ratio), do: "#{round((1.0 - ratio) * 100)}%"
