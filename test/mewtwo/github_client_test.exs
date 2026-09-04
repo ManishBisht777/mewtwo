@@ -191,7 +191,10 @@ defmodule Mewtwo.GithubClientTest do
         conn
         |> Plug.Conn.put_resp_header("x-ratelimit-remaining", "0")
         |> Plug.Conn.put_resp_header("retry-after", "45")
-        |> Plug.Conn.put_resp_header("x-ratelimit-reset", to_string(System.os_time(:second) + 900))
+        |> Plug.Conn.put_resp_header(
+          "x-ratelimit-reset",
+          to_string(System.os_time(:second) + 900)
+        )
         |> json(403, %{"message" => "Secondary rate limit"})
       end
 
@@ -300,6 +303,47 @@ defmodule Mewtwo.GithubClientTest do
 
       assert {:error, {:unexpected_body, reason}} = GithubClient.get_paginated("/x", plug: plug)
       assert reason =~ "expected a JSON array"
+    end
+  end
+
+  describe "post/3" do
+    test "sends the body as JSON with the default headers and auth" do
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        json(conn, 201, %{
+          "method" => conn.method,
+          "path" => conn.request_path,
+          "sent" => Jason.decode!(body),
+          "headers" => Map.new(conn.req_headers)
+        })
+      end
+
+      with_token("ghp_example", fn ->
+        assert {:ok, echo} =
+                 GithubClient.post("/repos/o/r/pulls/1/reviews", %{event: "COMMENT"}, plug: plug)
+
+        assert echo["method"] == "POST"
+        assert echo["path"] == "/repos/o/r/pulls/1/reviews"
+        assert echo["sent"] == %{"event" => "COMMENT"}
+        assert echo["headers"]["authorization"] == "token ghp_example"
+        assert echo["headers"]["accept"] == "application/vnd.github+json"
+      end)
+    end
+
+    test "maps a rejected body to an error instead of returning it as success" do
+      # GitHub answers an out-of-diff comment line with 422 and a normal JSON
+      # body; without the status check it would flow on as if it had posted.
+      plug = fn conn -> json(conn, 422, %{"message" => "line must be part of the diff"}) end
+
+      assert {:error, {:http_error, 422, message}} = GithubClient.post("/x", %{}, plug: plug)
+      assert message =~ "part of the diff"
+    end
+
+    test "reports whether a usable token is present" do
+      with_token(nil, fn -> refute GithubClient.authenticated?() end)
+      with_token("   ", fn -> refute GithubClient.authenticated?() end)
+      with_token("ghp_example", fn -> assert GithubClient.authenticated?() end)
     end
   end
 end

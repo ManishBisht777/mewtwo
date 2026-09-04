@@ -12,6 +12,8 @@ defmodule Mewtwo.Workers.ReviewWorker do
     * `"repo_path"` — optional local checkout used to resolve callers and
       tests. Without it the dynamic-context stage is skipped, since it greps
       the filesystem and a webhook job has no checkout.
+    * `"publish"` — optional boolean overriding `:review, :post_to_github`.
+      Set it to `false` to run a review without commenting on the PR.
   """
 
   use Oban.Worker, queue: :reviews, max_attempts: 3
@@ -23,6 +25,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
   alias Mewtwo.{Compression, Cost, DynamicContext, Judge, PRContext, Repo, Review}
   alias Mewtwo.Agents.Spawner
   alias Mewtwo.Findings.AgentFinding
+  alias Mewtwo.Github.Poster
 
   @default_agents ["bugs", "perf", "security", "architecture", "readability"]
 
@@ -38,8 +41,8 @@ defmodule Mewtwo.Workers.ReviewWorker do
     review = create_review(args)
 
     case run_pipeline(args) do
-      {:ok, author, reviewer, metadata, usage} ->
-        complete(review, author, reviewer, metadata, usage, started)
+      {:ok, author, reviewer, metadata} ->
+        complete(review, args, author, reviewer, metadata, started)
 
       # A rate limit clears on GitHub's schedule, not ours. Oban's default
       # backoff would spend all three attempts inside the same window.
@@ -57,15 +60,26 @@ defmodule Mewtwo.Workers.ReviewWorker do
     agents = Map.get(args, "agents") || @default_agents
 
     with {:ok, context} <- PRContext.fetch_with_diff(repo, pr_number),
-         {:ok, compressed} <- compress(context),
-         dynamic_context <- fetch_dynamic_context(compressed, args),
-         {:ok, findings, agent_meta} <- run_agents(agents, compressed, dynamic_context) do
+         {:ok, compressed, compression} <- compress(context),
+         fetched_context <- fetch_dynamic_context(compressed, args),
+         {:ok, findings, agent_meta} <-
+           run_agents(agents, compressed, context_items(fetched_context)) do
       Logger.info("[review] stage :judge start: judging #{length(findings)} raw findings")
 
-      {author, reviewer, metadata} =
+      {author, reviewer, judge_meta} =
         Judge.judge(findings, gitleaks_findings(), total_agents: length(agents))
 
-      {:ok, author, reviewer, metadata, agent_meta.usage}
+      metadata =
+        Map.merge(judge_meta, %{
+          agents: agents,
+          usage: agent_meta.usage,
+          compression: compression,
+          # Counts only: the fetched items are whole file excerpts, and this
+          # map is persisted as JSON on the review row.
+          context: context_counts(fetched_context)
+        })
+
+      {:ok, author, reviewer, metadata}
     end
   end
 
@@ -89,7 +103,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
       # a confidently empty review.
       {:error, {:empty_compressed_diff, "compression produced an empty diff"}}
     else
-      {:ok, compressed}
+      {:ok, compressed, meta}
     end
   end
 
@@ -99,6 +113,9 @@ defmodule Mewtwo.Workers.ReviewWorker do
     |> Keyword.get(:diff_token_budget, 100_000)
   end
 
+  # Returns DynamicContext's full result, or nil when the stage did not run —
+  # a distinction the summary comment reports, since a diff-only review is a
+  # weaker review and the author deserves to know.
   defp fetch_dynamic_context(compressed, args) do
     case args["repo_path"] do
       nil ->
@@ -107,7 +124,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
             "and tests cannot be resolved. Agents will see the diff only."
         )
 
-        []
+        nil
 
       repo_path ->
         result = DynamicContext.fetch(compressed, repo_path)
@@ -117,8 +134,21 @@ defmodule Mewtwo.Workers.ReviewWorker do
             "#{result.tokens_used} tokens"
         )
 
-        result.fetched_context
+        result
     end
+  end
+
+  defp context_items(nil), do: []
+  defp context_items(%{fetched_context: fetched}), do: fetched
+
+  defp context_counts(nil), do: nil
+
+  defp context_counts(result) do
+    %{
+      fetched: length(result.fetched_context),
+      skipped: length(result.skipped_items),
+      tokens_used: result.tokens_used
+    }
   end
 
   # G1-G3 are not built yet. Until then nothing can reach :high confidence,
@@ -212,24 +242,72 @@ defmodule Mewtwo.Workers.ReviewWorker do
     {:snooze, seconds + 5}
   end
 
-  defp complete(review, author, reviewer, metadata, usage, started) do
+  defp complete(review, args, author, reviewer, metadata, started) do
+    # Published before the row is written so the outcome is recorded with the
+    # review rather than needing a second update.
+    metadata = Map.put(metadata, :publish, publish(args, author, reviewer, metadata))
+
     review
     |> Review.changeset(%{
       status: "complete",
       completed_at: DateTime.utc_now(),
       # Judge metadata rides along with the author findings; a dedicated
       # column would be cleaner but needs a migration.
-      author_findings: findings_payload(author, Map.put(metadata, :usage, usage)),
+      author_findings: findings_payload(author, metadata),
       reviewer_findings: findings_payload(reviewer, nil)
     })
     |> Repo.update!()
 
-    # :publish is not implemented — nothing is posted back to GitHub yet.
-    Logger.warning("[review] stage :publish SKIPPED: no comment formatter (P1) yet")
-
-    log_totals(review, author, reviewer, metadata, usage, started)
+    log_totals(review, author, reviewer, metadata, metadata.usage, started)
 
     :ok
+  end
+
+  # A publishing failure does not fail the job. The findings are stored and
+  # the pipeline that produced them cost five model calls; retrying to fix a
+  # comment would re-run all of it, and a 403 from a missing `pull_requests:
+  # write` permission will fail again anyway.
+  defp publish(args, author, reviewer, metadata) do
+    cond do
+      not publish?(args) ->
+        Logger.info("[review] stage :publish SKIPPED: disabled by config or job args")
+        %{status: "skipped", reason: "disabled"}
+
+      is_nil(args["pr_number"]) ->
+        Logger.warning("[review] stage :publish SKIPPED: no pr_number in job args")
+        %{status: "skipped", reason: "no pr_number"}
+
+      true ->
+        do_publish(args, author, reviewer, metadata)
+    end
+  end
+
+  defp do_publish(args, author, reviewer, metadata) do
+    case Poster.post_review(args["repo"], args["pr_number"], author, reviewer, metadata) do
+      {:ok, result} ->
+        Logger.info(
+          "[review] stage :publish ok: review #{result.review_id}, " <>
+            "#{result.inline_comments} inline comments" <>
+            if(result.fallback, do: " (inline comments folded into the summary)", else: "")
+        )
+
+        %{status: "posted", review_id: result.review_id, inline_comments: result.inline_comments}
+
+      {:error, reason} ->
+        Logger.error(
+          "[review] stage :publish FAILED: #{inspect(reason)} — findings are stored but " <>
+            "nothing was posted to the PR"
+        )
+
+        %{status: "failed", reason: inspect(reason)}
+    end
+  end
+
+  defp publish?(args) do
+    case Map.fetch(args, "publish") do
+      {:ok, value} when is_boolean(value) -> value
+      _ -> Application.get_env(:mewtwo, :review, []) |> Keyword.get(:post_to_github, true)
+    end
   end
 
   defp log_totals(review, author, reviewer, metadata, usage, started) do

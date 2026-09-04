@@ -20,9 +20,13 @@ config :mewtwo, Oban,
 # lowest-review-value first to fit); max_prompt_tokens is the per-agent ceiling
 # checked before any model call, and must stay under the model's context window
 # with room for the response.
+# post_to_github posts the finished review back to the PR as one review
+# comment. It needs a GITHUB_TOKEN with `pull_requests: write`; without one
+# the publish stage logs the reason and the review is still stored.
 config :mewtwo, :review,
   diff_token_budget: 100_000,
-  max_prompt_tokens: 180_000
+  max_prompt_tokens: 180_000,
+  post_to_github: true
 
 config :mewtwo,
   ecto_repos: [Mewtwo.Repo],

@@ -1,6 +1,9 @@
 import Config
 config :mewtwo, Oban, testing: :manual
 
+# Nothing in the test suite may comment on a real pull request.
+config :mewtwo, :review, post_to_github: false
+
 # Configure your database
 #
 # The MIX_TEST_PARTITION environment variable can be used

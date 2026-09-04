@@ -272,42 +272,68 @@
 
 ## Phase 3: GitHub Output & Storage
 
-### P1: GitHub Comment Formatter
+### P1: GitHub Comment Formatter ✅ COMPLETE
 **Depends on:** J4
-**Files:** `lib/mewtwo/github/comment_formatter.ex`
-- [ ] Format author findings as inline PR comments
-- [ ] Include: file, line, severity, message, confidence badge
-- [ ] Keep comment concise (~3 lines per finding)
+**Files:** `lib/mewtwo/github/comment_formatter.ex`,
+`lib/mewtwo/github/finding_grouper.ex`
+- [x] Format author findings as inline PR comments
+- [x] Include: file, line, severity, message, confidence badge
+- [x] Keep comment concise (~3 lines per finding)
+- [x] Merge findings on the same `{file, line}` into one comment
+- [x] Collapse one issue reported file-by-file into a single summary entry
 
-**Acceptance:**
-- Correctly formatted comments, ready to post to GitHub
-- Includes severity + confidence info
+**Status:** ✅ Complete (17 formatter + 16 grouper tests passing)
+- `to_comments/1` returns `%{path, line, side, body}` params for the reviews API
+- Reasoning truncated at 500 graphemes; multi-line messages flattened
+- Findings with no usable line are excluded and listed in the summary instead
+- `FindingGrouper.partition/2` promotes 3+ findings in one category with ≥70%
+  message overlap to a *pattern* carrying every `{file, line}`. A real run's 5
+  "remove cross-module dependency" findings plus 3 "remove unused `props`" ones
+  became 2 inline comments and 2 summary entries instead of 8 comments
 
-### P2: GitHub Summary Formatter
+### P2: GitHub Summary Formatter ✅ COMPLETE
 **Depends on:** J4
 **Files:** `lib/mewtwo/github/summary_formatter.ex`
-- [ ] Create summary comment with:
+- [x] Create summary comment with:
   - Count of findings by severity
   - Tool agreement rate
   - Compression ratio
   - Context fetched vs. skipped
-- [ ] Include metadata (tokens used, agents run, gitleaks status)
+- [x] Include metadata (tokens used, agents run, gitleaks status)
+- [x] Reviewer findings listed in a collapsed section (capped at 12)
+- [x] "Repeated across the diff" section for grouped patterns (author group),
+      and one-line grouped entries in the reviewer list
 
-**Acceptance:**
-- Summary includes all required metadata
-- Human-readable format
+**Status:** ✅ Complete (18 tests passing)
+- Every stat is optional: a missing key omits its line rather than printing a
+  zero that reads as a measurement
+- Reads atom-keyed pipeline metadata and string-keyed metadata read back out
+  of the reviews table
+- Flags files dropped by truncation, since a clean review of half a diff is
+  misleading
 
-### P3: GitHub Poster
+### P3: GitHub Poster ✅ COMPLETE
 **Depends on:** P1, P2
-**Files:** `lib/mewtwo/github/poster.ex`
-- [ ] Post inline comments (author findings)
-- [ ] Post summary comment
-- [ ] Handle GitHub API errors (rate limit, auth, etc.)
-- [ ] Return: `{:ok, comment_ids}` or `{:error, reason}`
+**Files:** `lib/mewtwo/github/poster.ex`, `lib/mewtwo/github_client.ex` (POST support)
+- [x] Post inline comments (author findings)
+- [x] Post summary comment
+- [x] Handle GitHub API errors (rate limit, auth, etc.)
+- [x] Return: `{:ok, result}` or `{:error, reason}`
 
-**Acceptance:**
-- Successfully post comments to GitHub PR
-- Handle transient failures gracefully
+**Status:** ✅ Complete (15 poster + 3 client tests passing)
+- One `POST /pulls/:n/reviews` carries the summary body and every inline
+  comment: one notification for the author, and it cannot half-post
+- Only one-off findings get inline comments; recurring patterns live in the
+  summary, so a project-wide habit is one entry rather than one comment per file
+- `event: "COMMENT"`, never `REQUEST_CHANGES`
+- 422 (a line outside the diff) is retried once with the inline comments folded
+  into the summary body, so no finding is lost
+- Returns `%{review_id, inline_comments, fallback}` — GitHub's review endpoint
+  answers with the review, not per-comment ids
+- Wired into `ReviewWorker`'s `:publish` stage, gated on
+  `:review, :post_to_github` and the `"publish"` job arg. A publish failure
+  logs and records itself on the review rather than failing the job, which
+  would re-run five model calls
 
 ### DB1: Review State Storage
 **Depends on:** J4

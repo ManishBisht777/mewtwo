@@ -26,7 +26,7 @@ compresses it to fit a token budget, optionally gathers surrounding code
 context, fans out to five agents in parallel, and hands their findings to the
 judge, which deduplicates, scores and splits them into "the author must fix
 this" and "a reviewer might want to know this". The result is written to the
-`reviews` table. Nothing is posted back to GitHub yet.
+`reviews` table and posted to the PR as a single review comment.
 
 ---
 
@@ -75,10 +75,11 @@ this" and "a reviewer might want to know this". The result is written to the
 ║  :judge    Mewtwo.Judge.judge/3                    ✅                ║
 ║     │        dedup → confidence → split                              ║
 ║     ▼                                                                ║
-║  :persist  author_findings / reviewer_findings on the review  ✅     ║
-║     │                                                                ║
+║  :publish  Mewtwo.Github.Poster.post_review/6      ✅                ║
+║     │        one PR review: summary body + inline comments           ║
+║     │        gated on :review, :post_to_github                       ║
 ║     ▼                                                                ║
-║  :publish  post comments back to GitHub            ❌ NOT BUILT      ║
+║  :persist  author_findings / reviewer_findings on the review  ✅     ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -123,6 +124,12 @@ lib/mewtwo/
 │       ├── deduplicator.ex        merge findings describing one issue
 │       ├── confidence_scorer.ex   score from corroboration, then rank
 │       └── splitter.ex            author-actionable vs reviewer-context
+│
+├── github/
+│   ├── finding_grouper.ex         collapse one issue reported per file
+│   ├── comment_formatter.ex       findings → inline review comments
+│   ├── summary_formatter.ex       the run's summary comment
+│   └── poster.ex                ★ publishes the review to the PR
 │
 ├── findings/agent_finding.ex      the finding struct + validation
 ├── bedrock_client.ex              the only place that calls a model
@@ -171,6 +178,9 @@ default JSON media type returns the PR object instead.
 - **Pagination is capped** at 10 pages by default. Pointed at a listing
   endpoint, an uncapped `Link: rel="next"` follow will walk a repository's
   entire history and exhaust the hourly quota in a single call.
+- **Writes need a token.** `post/3` shares the same status mapping;
+  `authenticated?/0` lets a caller report a missing token as such instead of
+  passing GitHub's 401 downstream.
 
 ### 4.3 Compress — `Compression`
 
@@ -276,11 +286,59 @@ fastest way to lose their trust in the bot.
 explicitly when you know it — inferred from findings, it undercounts any agent
 that ran and found nothing.
 
-### 4.7 Persist
+### 4.7 Publish — `Github.Poster` + two formatters
+
+```
+{author, reviewer, metadata}
+        │
+        ▼
+  FindingGrouper ──► patterns ───► SummaryFormatter ──► review body
+        └──────────► individual ─► CommentFormatter ──► inline comments
+                                          │
+                                          ▼
+                       POST /repos/:repo/pulls/:n/reviews
+```
+
+One request, not N. A single **pull request review** carries the summary as its
+body and every author finding as an inline comment, so the author gets one
+notification and the post cannot land half-finished.
+
+- **`event: "COMMENT"`, never `REQUEST_CHANGES`.** A bot that blocks merges on
+  unverified model output has its permissions revoked within a week.
+- **Inline comments merge per `{file, line}`.** The judge groups on
+  `{file, line, category}`, so `bugs` and `security` on one line survive as two
+  findings; posted separately they read as the bot repeating itself.
+- **A recurring issue is one entry, not N comments.** `FindingGrouper` clusters
+  findings in the same category whose messages overlap by ≥70% (Jaccard on
+  words, so "…to portfolio data" and "…to portfolio data layer" are one issue)
+  and promotes a cluster of 3+ to a *pattern*. Patterns cannot be inline —
+  they span files — so they go in the summary with every location listed. This
+  is measured, not theoretical: one real run produced five "remove cross-module
+  dependency from bookfolio to portfolio data" findings and three "remove
+  unused `props` parameter" ones, which was 7 inline comments where 2 plus one
+  summary entry says more. Two occurrences stay individual: a comment on the
+  exact line beats a summary entry, and twice is a coincidence.
+- **422 is retried once.** GitHub rejects a comment on a line outside the diff
+  — and rejects the *whole review* when it does. Agents do occasionally report
+  a line just past a hunk, so the retry folds the inline comments into the
+  summary body. A slightly worse review beats a review nobody sees.
+- **Reviewer findings live in the summary** behind a `<details>`, capped at 12.
+  They are context, not a task list.
+- **A publish failure does not fail the job.** The findings are already stored
+  and producing them cost five model calls; retrying to fix a comment re-runs
+  all of it, and a 403 from a missing `pull_requests: write` scope will fail
+  again anyway. The outcome is recorded on the review as
+  `author_findings["metadata"]["publish"]`.
+
+Gated on `:review, :post_to_github` (default true, forced off in `test.exs`)
+and overridable per job with `"publish" => false`.
+
+### 4.8 Persist
 
 Findings are written to the `reviews` row as JSON via `AgentFinding.to_map/1`.
-Judge metadata and token usage ride inside `author_findings["metadata"]`;
-a dedicated column would be cleaner but needs a migration.
+Judge metadata, token usage, compression and context counts, and the publish
+outcome all ride inside `author_findings["metadata"]`; a dedicated column would
+be cleaner but needs a migration.
 
 ```elixir
 Mewtwo.Repo.all(Mewtwo.Review) |> List.last() |> Map.get(:author_findings)
@@ -337,7 +395,7 @@ than inserting a duplicate.
 
 Every stage logs entry and exit with timings, sizes and token counts, prefixed
 by stage: `[review]`, `[pr]`, `[compression]`, `[context]`, `[agents]`,
-`[agent <name>]`, `[bedrock]`, `[judge]`. Each agent logs its findings one per
+`[agent <name>]`, `[bedrock]`, `[judge]`, `[publish]`. Each agent logs its findings one per
 line; the judge logs its decisions and the final author/reviewer lists with
 `confirmed by` provenance. `--log-level debug` adds per-compression-stage
 deltas and per-finding reasoning.
@@ -348,6 +406,7 @@ deltas and per-finding reasoning.
 |---|---|---|
 | `:review, :diff_token_budget` | `config/config.exs` | Ceiling on the compressed diff (default 100k) |
 | `:review, :max_prompt_tokens` | `config/config.exs` | Per-agent pre-flight ceiling (default 180k) |
+| `:review, :post_to_github` | `config/config.exs` | Whether to comment on the PR (default true, off in test) |
 | `:bedrock` | `config/runtime.exs` | Token, model ID, region |
 | `:bedrock_pricing` | `config/runtime.exs` | Per-MTok rates for cost reporting |
 | `Oban, queues` | `config/config.exs` | Must include `reviews:` or jobs never run |
@@ -372,6 +431,7 @@ Verified against the code and its tests, not against the task list.
 | Model calls | `bedrock_client` | Opus 4.5 via Bedrock API key |
 | Judge | `judge` + 3 stages | J1–J4 complete |
 | Cost | `cost` | Exact tokens; prices need configuring |
+| GitHub output | `github/finding_grouper`, `github/comment_formatter`, `github/summary_formatter`, `github/poster` | P1–P3 complete; one review per PR |
 | Persistence | `review` schema | Findings + metadata as JSON |
 
 ### Not built
@@ -379,7 +439,6 @@ Verified against the code and its tests, not against the task list.
 | Gap | Impact |
 |---|---|
 | **Gitleaks** (`gitleaks_runner`, `gitleaks_parser`, `gitleaks`) | No finding can reach `:high` confidence — that tier *requires* an agent and a tool agreeing. Every real run reports `tool_agreement_rate: 0.0`. The judge handles this cleanly, but its central scoring rule is inert until this lands. |
-| **GitHub output** (`comment_formatter`, `summary_formatter`, `poster`) | Reviews are stored, never posted. The loop is not closed for a user. |
 | **Metrics** (`compression_metrics`, `agreement_metrics`, dashboard) | No visibility beyond logs. |
 | **Integration tests** | Every stage is unit-tested; nothing tests them wired together. |
 
@@ -392,12 +451,18 @@ Verified against the code and its tests, not against the task list.
   fix.
 - **Cross-category duplicates are not merged.** Grouping includes `category`,
   so `bugs` and `security` flagging the same line produce two findings. Per
-  spec, but the author sees the same issue twice.
+  spec; `CommentFormatter` merges them into one comment so the author does not
+  see the same line commented twice, but they are still two findings on the
+  record.
 - **`diff_token_budget: 100_000` is expensive** — every agent gets the full
   diff, so five agents is up to 500k input tokens per review.
-- **Truncation is not persisted.** When a lockfile is dropped to fit budget,
-  the agents are told via an in-prompt marker but nothing records it on the
-  review.
+- **Truncation is persisted but the diff is not.** Dropped files are recorded
+  in `metadata.compression` and named in the summary comment, but the
+  compressed diff the agents actually saw is not kept.
+- **Publishing is not idempotent.** Re-running a review for the same PR posts a
+  second review; nothing looks for one already posted. Re-review on
+  `synchronize` is exactly that case, so pushing to a labelled PR accumulates
+  review comments.
 
 ---
 
@@ -406,7 +471,7 @@ Verified against the code and its tests, not against the task list.
 ```bash
 mix deps.get
 mix ecto.setup
-mix test                 # ~320 tests, no network calls except a few GitHub 401s
+mix test                 # ~390 tests, no network calls except a few GitHub 401s
 iex -S mix phx.server
 ```
 
@@ -415,13 +480,15 @@ Trigger a review without a webhook or a tunnel:
 ```elixir
 %{"pr_id" => 1, "repo" => "owner/name", "pr_number" => 42,
   "agents" => ["bugs"],                   # cheaper than the default five
-  "repo_path" => "/path/to/local/clone"}  # omit to skip dynamic context
+  "repo_path" => "/path/to/local/clone",  # omit to skip dynamic context
+  "publish" => false}                     # omit to comment on the real PR
 |> Mewtwo.Workers.ReviewWorker.new()
 |> Oban.insert!()
 ```
 
-Required in `.env`: `BEDROCK_TOKEN`, `BEDROCK_MODEL_ID`. Strongly recommended:
-`GITHUB_TOKEN` (private repos, and 5000 req/hour instead of 60).
+Required in `.env`: `BEDROCK_TOKEN`, `BEDROCK_MODEL_ID`. Required to post the
+review back: `GITHUB_TOKEN` with `pull_requests: write` — also what gets you
+private repos and 5000 req/hour instead of 60.
 
 ---
 

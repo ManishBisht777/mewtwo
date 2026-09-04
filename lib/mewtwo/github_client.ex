@@ -56,11 +56,40 @@ defmodule Mewtwo.GithubClient do
     collect_pages(@github_api_url <> path, req_opts, [], max_pages)
   end
 
+  @doc """
+  POST a JSON body to a single API path
+
+  Options are passed through to `Req.request/1`, so `:headers` merges over the
+  defaults exactly as in `get/2`.
+
+  Returns `{:ok, body}` or `{:error, reason}`, with non-2xx mapped to the same
+  reasons `get/2` uses — notably `{:unauthorized, msg}` for a missing or
+  under-scoped token and `{:http_error, 422, msg}` for a body GitHub rejects.
+
+  Every write needs a token: anonymous requests can read public repositories
+  but cannot post. See `authenticated?/0`.
+  """
+  def post(path, body, opts \\ []) do
+    with {:ok, response} <- do_request(:post, @github_api_url <> path, [json: body] ++ opts) do
+      {:ok, response.body}
+    end
+  end
+
+  @doc """
+  Whether a usable `GITHUB_TOKEN` is present
+
+  Worth checking before a write, so a missing token is reported as such
+  instead of arriving as a confusing 401 from GitHub.
+  """
+  def authenticated?, do: token() != nil
+
   defp collect_pages(nil, _opts, acc, _remaining), do: {:ok, acc}
 
   defp collect_pages(url, _opts, acc, 0) do
-    Logger.warning("GitHub pagination stopped at the page cap with #{length(acc)} items; " <>
-                     "next page would have been #{url}")
+    Logger.warning(
+      "GitHub pagination stopped at the page cap with #{length(acc)} items; " <>
+        "next page would have been #{url}"
+    )
 
     {:ok, acc}
   end
@@ -78,11 +107,13 @@ defmodule Mewtwo.GithubClient do
     {:error, {:unexpected_body, "expected a JSON array from #{url}, got #{type_of(body)}"}}
   end
 
-  defp do_get(url, opts) do
+  defp do_get(url, opts), do: do_request(:get, url, opts)
+
+  defp do_request(method, url, opts) do
     {overrides, req_opts} = Keyword.pop(opts, :headers, [])
     headers = merge_headers(@default_headers ++ auth_headers(), overrides)
 
-    case Req.get(url, [headers: headers] ++ req_opts) do
+    case Req.request([method: method, url: url, headers: headers] ++ req_opts) do
       {:ok, response} -> check_status(response, url)
       {:error, reason} -> {:error, {:request_failed, reason}}
     end
