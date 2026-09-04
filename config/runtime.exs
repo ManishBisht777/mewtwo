@@ -119,8 +119,7 @@ end
 # AWS Bedrock Configuration (all environments)
 config :mewtwo, :bedrock,
   token: System.get_env("BEDROCK_TOKEN"),
-  model_id:
-    System.get_env("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
+  model_id: System.get_env("BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
   region: System.get_env("BEDROCK_REGION", "us-east-1")
 
 # Per-token rates for cost reporting. Bedrock is partner-operated and priced
@@ -131,4 +130,3 @@ config :mewtwo, :bedrock,
 config :mewtwo, :bedrock_pricing,
   input_usd_per_mtok: System.get_env("BEDROCK_INPUT_USD_PER_MTOK"),
   output_usd_per_mtok: System.get_env("BEDROCK_OUTPUT_USD_PER_MTOK")
-

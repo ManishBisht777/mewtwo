@@ -29,6 +29,7 @@ defmodule Mewtwo.Workers.ReviewWorker do
   require Logger
 
   alias Mewtwo.{Compression, Cost, DynamicContext, Judge, PRContext, Repo, Review}
+  alias Phoenix.PubSub
   alias Mewtwo.Agents.Spawner
   alias Mewtwo.Findings.AgentFinding
   alias Mewtwo.Github.Poster
@@ -50,14 +51,14 @@ defmodule Mewtwo.Workers.ReviewWorker do
   ]
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: args}) do
+  def perform(%Oban.Job{id: job_id, args: args}) do
     started = System.monotonic_time(:millisecond)
 
     Logger.info("[review] start: #{args["repo"]}##{args["pr_number"]}")
 
-    review = create_review(args)
+    review = create_review(args, job_id)
 
-    case run_pipeline(args) do
+    case run_pipeline(review, args) do
       {:ok, author, reviewer, metadata, auth} ->
         complete(review, args, author, reviewer, metadata, auth, started)
 
@@ -71,17 +72,23 @@ defmodule Mewtwo.Workers.ReviewWorker do
     end
   end
 
-  defp run_pipeline(args) do
+  defp run_pipeline(review, args) do
     repo = args["repo"]
     pr_number = args["pr_number"]
     agents = Map.get(args, "agents") || @default_agents
 
-    with {:ok, auth} <- authenticate(args),
+    with stage(review, "auth"),
+         {:ok, auth} <- authenticate(args),
+         stage(review, "fetch"),
          {:ok, context} <- PRContext.fetch_with_diff(repo, pr_number, auth),
+         stage(review, "compress"),
          {:ok, compressed, compression} <- compress(context),
+         stage(review, "context"),
          fetched_context <- fetch_dynamic_context(compressed, args),
+         stage(review, "agents"),
          {:ok, findings, agent_meta} <-
-           run_agents(agents, compressed, context_items(fetched_context)) do
+           run_agents(agents, compressed, context_items(fetched_context), review.id) do
+      stage(review, "judge")
       Logger.info("[review] stage :judge start: judging #{length(findings)} raw findings")
 
       {author, reviewer, judge_meta} =
@@ -91,6 +98,10 @@ defmodule Mewtwo.Workers.ReviewWorker do
         Map.merge(judge_meta, %{
           agents: agents,
           usage: agent_meta.usage,
+          # Per-agent tokens and latency are computed by the Spawner and were
+          # previously discarded; the dashboard renders them on expand.
+          per_agent: agent_meta.per_agent,
+          agent_errors: agent_meta.errors,
           compression: compression,
           # Counts only: the fetched items are whole file excerpts, and this
           # map is persisted as JSON on the review row.
@@ -99,6 +110,20 @@ defmodule Mewtwo.Workers.ReviewWorker do
 
       {:ok, author, reviewer, metadata, auth}
     end
+  end
+
+  # Records which stage the run is on and tells the dashboard. Persisted rather
+  # than telemetry-only so the stage survives a page reload and a node restart.
+  defp stage(review, name) do
+    review
+    |> Review.changeset(%{stage: name, stage_started_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    announce(review.id, name)
+  end
+
+  defp announce(review_id, name) do
+    PubSub.broadcast(Mewtwo.PubSub, "reviews", {:stage, review_id, name})
   end
 
   # One identity for the whole review. Resolved before the first request so a
@@ -199,11 +224,13 @@ defmodule Mewtwo.Workers.ReviewWorker do
     []
   end
 
-  defp run_agents(agents, compressed, dynamic_context) do
+  defp run_agents(agents, compressed, dynamic_context, review_id) do
     Logger.info("[review] stage :agents start: #{length(agents)} agents")
 
     {:ok, findings, meta} =
-      Spawner.spawn_agents(agents, compressed, dynamic_context, gitleaks_findings())
+      Spawner.spawn_agents(agents, compressed, dynamic_context, gitleaks_findings(),
+        review_id: review_id
+      )
 
     log_per_agent(meta.per_agent)
 
@@ -234,27 +261,39 @@ defmodule Mewtwo.Workers.ReviewWorker do
 
   # Reuses an unfinished review for the same PR so a retried or snoozed job
   # does not leave a trail of duplicate rows.
-  defp create_review(args) do
-    case find_unfinished(args) do
-      nil ->
-        review =
-          %Review{
-            pr_id: args["pr_id"],
-            repo: args["repo"],
-            status: "pending",
-            triggered_at: DateTime.utc_now()
-          }
-          |> Repo.insert!()
+  defp create_review(args, job_id) do
+    review =
+      case find_unfinished(args) do
+        nil ->
+          review =
+            %Review{
+              pr_id: args["pr_id"],
+              repo: args["repo"],
+              status: "pending",
+              triggered_at: DateTime.utc_now()
+            }
+            |> Repo.insert!()
 
-        Logger.info("[review] stage :record ok: review id=#{review.id}")
+          Logger.info("[review] stage :record ok: review id=#{review.id}")
 
-        review
+          review
 
-      review ->
-        Logger.info("[review] stage :record ok: resuming review id=#{review.id}")
+        review ->
+          Logger.info("[review] stage :record ok: resuming review id=#{review.id}")
 
-        review
-    end
+          review
+      end
+
+    # The job id is what makes a zombie run distinguishable from a slow one:
+    # the dashboard joins oban_jobs for liveness.
+    review
+    |> Review.changeset(%{
+      stage: "record",
+      stage_started_at: DateTime.utc_now(),
+      oban_job_id: job_id
+    })
+    |> Repo.update!()
+    |> tap(&announce(&1.id, "record"))
   end
 
   defp find_unfinished(args) do
@@ -284,9 +323,13 @@ defmodule Mewtwo.Workers.ReviewWorker do
   end
 
   defp complete(review, args, author, reviewer, metadata, auth, started) do
+    stage(review, "publish")
+
     # Published before the row is written so the outcome is recorded with the
     # review rather than needing a second update.
     metadata = Map.put(metadata, :publish, publish(args, author, reviewer, metadata, auth))
+
+    usage = metadata.usage
 
     review
     |> Review.changeset(%{
@@ -295,13 +338,26 @@ defmodule Mewtwo.Workers.ReviewWorker do
       # Judge metadata rides along with the author findings; a dedicated
       # column would be cleaner but needs a migration.
       author_findings: findings_payload(author, metadata),
-      reviewer_findings: findings_payload(reviewer, nil)
+      reviewer_findings: findings_payload(reviewer, nil),
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      calls: usage.calls,
+      cost_usd: frozen_cost(usage)
     })
     |> Repo.update!()
 
-    log_totals(review, author, reviewer, metadata, metadata.usage, started)
+    log_totals(review, author, reviewer, metadata, usage, started)
+    announce(review.id, "done")
 
     :ok
+  end
+
+  # nil, not 0.0, when rates are unset: a zero would read as a free review.
+  defp frozen_cost(usage) do
+    case Cost.estimate(usage) do
+      {:ok, cost} -> cost
+      :no_rates -> nil
+    end
   end
 
   # A publishing failure does not fail the job. The findings are stored and
@@ -401,8 +457,16 @@ defmodule Mewtwo.Workers.ReviewWorker do
     Logger.error("[review] failed after #{elapsed(started)}ms: #{inspect(reason)}")
 
     review
-    |> Review.changeset(%{status: "failed", completed_at: DateTime.utc_now()})
+    |> Review.changeset(%{
+      status: "failed",
+      completed_at: DateTime.utc_now(),
+      # Without this the reason lives only in the log line above, so every
+      # incident starts by shelling into logs.
+      error: inspect(reason)
+    })
     |> Repo.update!()
+
+    announce(review.id, "done")
 
     if permanent?(reason) do
       # Cancel rather than retry: the outcome will not change.

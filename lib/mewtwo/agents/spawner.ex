@@ -28,15 +28,20 @@ defmodule Mewtwo.Agents.Spawner do
     - gitleaks_findings: secrets found by Gitleaks
     - opts: keyword options
       - timeout: milliseconds (default 60000)
+      - review_id: broadcast per-agent start/finish on the "reviews" topic so
+        the dashboard can render this stage live. The five tasks only
+        broadcast; only the worker writes, so there is no write contention.
 
   Returns `{:ok, findings, meta}` where meta is:
 
     - `:usage` — token usage summed across every agent call
     - `:errors` — one message per agent that failed (empty when all succeeded)
-    - `:per_agent` — `%{agent_name => %{findings: n, usage: usage}}`
+    - `:per_agent` — `%{agent_name => %{findings: n, usage: usage, ms: n,
+      error: reason | nil}}`
   """
   def spawn_agents(agents, diff, context, gitleaks_findings, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 60_000)
+    review_id = Keyword.get(opts, :review_id)
     started = System.monotonic_time(:millisecond)
 
     Logger.info(
@@ -49,12 +54,23 @@ defmodule Mewtwo.Agents.Spawner do
       agents
       |> Enum.map(fn agent ->
         Task.async(fn ->
-          run_agent(agent, diff, context, gitleaks_findings, timeout)
+          broadcast(review_id, agent, :running)
+          result = run_agent(agent, diff, context, gitleaks_findings, timeout)
+          # Broadcast from inside the task, not after await_many: the point of
+          # the live checklist is that agents land one at a time.
+          broadcast(review_id, agent, elem(result, 0))
+          result
         end)
       end)
       |> Task.await_many(timeout + 5_000)
 
     collect_results(results, agents, System.monotonic_time(:millisecond) - started)
+  end
+
+  defp broadcast(nil, _agent, _status), do: :ok
+
+  defp broadcast(review_id, agent, status) do
+    Phoenix.PubSub.broadcast(Mewtwo.PubSub, "reviews", {:agent, review_id, agent, status})
   end
 
   defp run_agent(agent_name, diff, context, gitleaks_findings, timeout) do
@@ -74,7 +90,8 @@ defmodule Mewtwo.Agents.Spawner do
 
       Logger.error("[agent #{agent_name}] skipped without calling the model: #{reason}")
 
-      {:error, agent_name, "Agent #{agent_name} skipped: #{reason}"}
+      {:error, agent_name, "Agent #{agent_name} skipped: #{reason}",
+       System.monotonic_time(:millisecond) - started}
     else
       invoke_agent(agent_name, prompt, timeout, started)
     end
@@ -94,12 +111,12 @@ defmodule Mewtwo.Agents.Spawner do
 
         log_agent_output(agent_name, findings, usage, response, elapsed)
 
-        {:ok, agent_name, findings, usage}
+        {:ok, agent_name, findings, usage, elapsed}
 
       {:error, reason} ->
         elapsed = System.monotonic_time(:millisecond) - started
         Logger.error("[agent #{agent_name}] failed after #{elapsed}ms: #{reason}")
-        {:error, agent_name, "Agent #{agent_name} failed: #{reason}"}
+        {:error, agent_name, "Agent #{agent_name} failed: #{reason}", elapsed}
     end
   end
 
@@ -294,27 +311,29 @@ defmodule Mewtwo.Agents.Spawner do
   defp collect_results(results, agents, elapsed_ms) do
     findings =
       Enum.flat_map(results, fn
-        {:ok, _agent, agent_findings, _usage} -> agent_findings
-        {:error, _agent, _reason} -> []
+        {:ok, _agent, agent_findings, _usage, _ms} -> agent_findings
+        {:error, _agent, _reason, _ms} -> []
       end)
 
-    errors = for {:error, _agent, reason} <- results, do: reason
+    errors = for {:error, _agent, reason, _ms} <- results, do: reason
 
     usage =
       results
       |> Enum.flat_map(fn
-        {:ok, _agent, _findings, agent_usage} -> [agent_usage]
-        {:error, _agent, _reason} -> []
+        {:ok, _agent, _findings, agent_usage, _ms} -> [agent_usage]
+        {:error, _agent, _reason, _ms} -> []
       end)
       |> Cost.total()
 
     per_agent =
       Map.new(results, fn
-        {:ok, agent, agent_findings, agent_usage} ->
-          {agent, %{findings: length(agent_findings), usage: agent_usage}}
+        {:ok, agent, agent_findings, agent_usage, ms} ->
+          {agent, %{findings: length(agent_findings), usage: agent_usage, ms: ms, error: nil}}
 
-        {:error, agent, _reason} ->
-          {agent, %{findings: 0, usage: Cost.zero()}}
+        # The reason used to be dropped here, which made a partial run
+        # ("2 of 5 agents died") unreadable without the logs.
+        {:error, agent, reason, ms} ->
+          {agent, %{findings: 0, usage: Cost.zero(), ms: ms, error: reason}}
       end)
 
     Logger.info(
